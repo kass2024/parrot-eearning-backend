@@ -62,29 +62,69 @@ class ZoomService
             return null;
         }
 
-        return $client->get("/users/{$userId}/meetings")->json();
+        $host = $userId === 'me' ? $this->hostUserId() : $userId;
+
+        return $client->get('/users/' . rawurlencode($host) . '/meetings')->json();
     }
 
-    public function listRecordings(string $userId = 'me'): ?array
+    public function listRecordings(?string $userId = null, int $monthsBack = 6): ?array
     {
         $client = $this->client();
         if (!$client) {
             return null;
         }
 
-        $response = $client->get("/users/{$userId}/recordings", [
-            'page_size' => 100,
-        ]);
+        $host = $userId ?: $this->hostUserId();
+        $encodedUser = rawurlencode($host);
+        $meetingsByKey = [];
 
-        if ($response->failed()) {
-            return [
-                'error' => true,
-                'status' => $response->status(),
-                'body' => $response->json(),
-            ];
+        for ($i = 0; $i < max(1, $monthsBack); $i++) {
+            $month = now()->subMonths($i);
+            $from = $month->copy()->startOfMonth()->format('Y-m-d');
+            $to = $i === 0
+                ? now()->format('Y-m-d')
+                : $month->copy()->endOfMonth()->format('Y-m-d');
+
+            $nextPageToken = null;
+
+            do {
+                $params = [
+                    'from' => $from,
+                    'to' => $to,
+                    'page_size' => 300,
+                ];
+
+                if ($nextPageToken) {
+                    $params['next_page_token'] = $nextPageToken;
+                }
+
+                $response = $client->get("/users/{$encodedUser}/recordings", $params);
+
+                if ($response->failed()) {
+                    return [
+                        'error' => true,
+                        'status' => $response->status(),
+                        'body' => $response->json(),
+                    ];
+                }
+
+                $page = $response->json();
+
+                foreach (($page['meetings'] ?? []) as $meeting) {
+                    $key = (string) ($meeting['uuid'] ?? $meeting['id'] ?? md5(json_encode($meeting)));
+                    $meetingsByKey[$key] = $meeting;
+                }
+
+                $nextPageToken = $page['next_page_token'] ?? null;
+            } while (!empty($nextPageToken));
         }
 
-        return $response->json();
+        $meetings = array_values($meetingsByKey);
+        usort($meetings, function (array $a, array $b) {
+            return strcmp((string) ($b['start_time'] ?? ''), (string) ($a['start_time'] ?? ''));
+        });
+
+        return ['meetings' => $meetings];
     }
 
     public function hostUserId(): string
@@ -399,9 +439,9 @@ class ZoomService
     /**
      * @return array<string, list<array<string, mixed>>>
      */
-    public function recordingsGroupedByMeetingId(string $userId = 'me'): array
+    public function recordingsGroupedByMeetingId(?string $userId = null): array
     {
-        $data = $this->listRecordings($userId);
+        $data = $this->listRecordings($userId ?: $this->hostUserId());
         if ($data === null || !empty($data['error'])) {
             return [];
         }

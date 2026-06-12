@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Services\MailDeliveryService;
 use App\Services\ZoomService;
+use App\Support\AdminRecordingCatalog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
@@ -42,14 +43,20 @@ class ZoomController extends Controller
 
     public function listRecordings()
     {
-        // Use the Zoom user associated with the current access token
-        $data = $this->zoom->listRecordings('me');
+        if (!$this->zoom->isConfigured()) {
+            return response()->json([
+                'message' => 'Zoom API is not configured. Set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, and ZOOM_CLIENT_SECRET.',
+                'recordings' => [],
+                'zoom_api_configured' => false,
+            ], 200);
+        }
+
+        $data = $this->zoom->listRecordings($this->zoom->hostUserId());
 
         if ($data === null) {
             return response()->json(['message' => 'Unable to contact Zoom for recordings'], 500);
         }
 
-        // Bubble up Zoom API errors so the frontend can see what went wrong
         if (is_array($data) && !empty($data['error']) && isset($data['status'])) {
             return response()->json([
                 'message' => 'Zoom recordings API error',
@@ -58,32 +65,15 @@ class ZoomController extends Controller
             ], (int) $data['status']);
         }
 
-        $items = [];
+        $items = AdminRecordingCatalog::annotateItems(
+            $this->zoom->formatRecordingItems($data)
+        );
 
-        foreach (($data['meetings'] ?? []) as $meeting) {
-            $files = [];
-
-            foreach (($meeting['recording_files'] ?? []) as $file) {
-                $files[] = [
-                    'id'             => $file['id'] ?? null,
-                    'recording_type' => $file['recording_type'] ?? null,
-                    'file_type'      => $file['file_type'] ?? null,
-                    'play_url'       => $file['play_url'] ?? null,
-                    'download_url'   => $file['download_url'] ?? null,
-                ];
-            }
-
-            $items[] = [
-                'uuid'       => $meeting['uuid'] ?? null,
-                'id'         => $meeting['id'] ?? null,
-                'topic'      => $meeting['topic'] ?? 'Recorded meeting',
-                'start_time' => $meeting['start_time'] ?? null,
-                'duration'   => $meeting['duration'] ?? null,
-                'files'      => $files,
-            ];
-        }
-
-        return response()->json(['recordings' => $items], 200);
+        return response()->json([
+            'recordings' => $items,
+            'zoom_api_configured' => true,
+            'total' => count($items),
+        ], 200);
     }
 
     public function createMeeting(Request $request)

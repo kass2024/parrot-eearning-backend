@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use App\Services\MailDeliveryService;
+use App\Support\AdminRecordingCatalog;
 use Illuminate\Support\Str;
 use Carbon\Carbon;
 
@@ -890,9 +891,20 @@ class MeetingRegistrationController extends Controller
             ], 502);
         }
 
-        $items = $this->zoom->formatRecordingItems($data);
+        $items = AdminRecordingCatalog::annotateItems(
+            $this->zoom->formatRecordingItems($data)
+        );
 
-        if ($meetingId) {
+        $webinarMeetingIds = array_keys(array_filter(
+            AdminRecordingCatalog::sourceByMeetingId(),
+            fn (string $source) => $source === 'webinar'
+        ));
+
+        if ($webinarMeetingIds !== []) {
+            $items = array_values(array_filter($items, function ($item) use ($webinarMeetingIds) {
+                return in_array((string) ($item['id'] ?? ''), $webinarMeetingIds, true);
+            }));
+        } elseif ($meetingId) {
             $items = array_values(array_filter($items, function ($item) use ($meetingId) {
                 return (string) ($item['id'] ?? '') === (string) $meetingId;
             }));
