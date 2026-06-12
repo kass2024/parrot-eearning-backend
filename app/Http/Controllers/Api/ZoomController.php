@@ -201,6 +201,39 @@ class ZoomController extends Controller
         return response()->json(['message' => 'Meeting deleted on Zoom']);
     }
 
+    public function setMeetingRecording(Request $request, string $id)
+    {
+        $data = $request->validate([
+            'enabled' => 'required|boolean',
+        ]);
+
+        if ($id === 'pathways-webinar') {
+            return response()->json([
+                'message' => 'Use Webinar Signups to manage recording for the Pathways webinar room.',
+            ], 422);
+        }
+
+        $enabled = (bool) $data['enabled'];
+        $result = $this->zoom->setMeetingAutoRecording($id, $enabled);
+
+        if ($result === null) {
+            return response()->json(['message' => 'Unable to contact Zoom'], 503);
+        }
+
+        if (!empty($result['error'])) {
+            return response()->json([
+                'message' => 'Zoom rejected the recording setting change.',
+                'details' => $result['body'] ?? null,
+            ], 502);
+        }
+
+        return response()->json([
+            'message' => $enabled ? 'Cloud recording enabled for this meeting.' : 'Cloud recording disabled.',
+            'recording_enabled' => $enabled,
+            'meeting_id' => $id,
+        ]);
+    }
+
     public function listWebinars()
     {
         $hostId = (string) config('services.zoom.host_user_id', 'me');

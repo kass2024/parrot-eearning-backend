@@ -25,6 +25,7 @@ use App\Http\Controllers\Api\CertificateController;
 use App\Services\ZoomService;
 
 use App\Support\CourseMaterialHelper;
+use App\Support\LearnerRecordingAccess;
 
 use Carbon\Carbon;
 
@@ -453,151 +454,33 @@ class LearnerDashboardController extends Controller
 
 
     public function recordings(Request $request)
-
     {
-
         $studentId = $request->query('student_id');
-
         if (!$studentId) {
-
             return response()->json(['message' => 'student_id is required'], 400);
-
         }
-
-
 
         $student = Student::find($studentId);
-
         if (!$student) {
-
             return response()->json(['message' => 'Student not found'], 404);
-
         }
 
-
-
-        $courseTitles = CourseEnrollment::query()
-
-            ->with('course:id,title')
-
-            ->where('student_id', $student->id)
-
-            ->whereIn('status', ['paid', 'completed'])
-
-            ->get()
-
-            ->map(fn (CourseEnrollment $e) => strtolower((string) ($e->course?->title ?? '')))
-
-            ->filter()
-
-            ->unique()
-
-            ->values()
-
-            ->all();
-
-
-
-        if (empty($courseTitles)) {
-
-            return response()->json(['recordings' => []], 200);
-
+        $allowedMeetingIds = LearnerRecordingAccess::liveClassMeetingIdsForStudent((int) $studentId);
+        if (empty($allowedMeetingIds)) {
+            return response()->json([
+                'recordings' => [],
+                'message' => 'Recordings are available only for paid live classes in your enrolled courses.',
+            ], 200);
         }
 
+        $grouped = LearnerRecordingAccess::filterGroupedRecordings(
+            $this->zoom->recordingsGroupedByMeetingId(),
+            $allowedMeetingIds
+        );
 
-
-        $data = $this->zoom->listRecordings('me');
-
-        if ($data === null) {
-
-            return response()->json(['message' => 'Unable to contact Zoom for recordings'], 503);
-
-        }
-
-
-
-        $items = [];
-
-        foreach (($data['meetings'] ?? []) as $meeting) {
-
-            $topic = strtolower((string) ($meeting['topic'] ?? ''));
-
-            $matchesCourse = false;
-
-            foreach ($courseTitles as $title) {
-
-                if ($title !== '' && (str_contains($topic, $title) || str_contains($title, $topic))) {
-
-                    $matchesCourse = true;
-
-                    break;
-
-                }
-
-            }
-
-
-
-            if (!$matchesCourse) {
-
-                continue;
-
-            }
-
-
-
-            $files = [];
-
-            foreach (($meeting['recording_files'] ?? []) as $file) {
-
-                $files[] = [
-
-                    'id' => $file['id'] ?? null,
-
-                    'recording_type' => $file['recording_type'] ?? null,
-
-                    'file_type' => $file['file_type'] ?? null,
-
-                    'play_url' => $file['play_url'] ?? null,
-
-                    'download_url' => $file['download_url'] ?? null,
-
-                ];
-
-            }
-
-
-
-            if (empty($files)) {
-
-                continue;
-
-            }
-
-
-
-            $items[] = [
-
-                'uuid' => $meeting['uuid'] ?? null,
-
-                'id' => $meeting['id'] ?? null,
-
-                'topic' => $meeting['topic'] ?? 'Recorded class',
-
-                'start_time' => $meeting['start_time'] ?? null,
-
-                'duration' => $meeting['duration'] ?? null,
-
-                'files' => $files,
-
-            ];
-
-        }
-
-
-
-        return response()->json(['recordings' => $items], 200);
-
+        return response()->json([
+            'recordings' => LearnerRecordingAccess::flattenGroupedRecordings($grouped),
+        ], 200);
     }
 
 

@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\AvailableSchedule;
 use App\Models\MeetingRegistration;
 use App\Models\User;
+use App\Models\WebinarSetting;
 use App\Services\ZoomService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -475,6 +476,169 @@ class MeetingRegistrationController extends Controller
                 'error' => $e->getMessage(),
             ]);
         }
+    }
+
+    private function approvedRegistrationCount(): int
+    {
+        return MeetingRegistration::query()
+            ->whereRaw("LOWER(COALESCE(status, 'pending')) = 'approved'")
+            ->count();
+    }
+
+    private function pathwaysJoinUrl(): ?string
+    {
+        $url = trim((string) config('services.pathways_webinar.zoom_join_url', ''));
+
+        return $url !== '' ? $url : null;
+    }
+
+    private function resolvePathwaysStartUrl(?string $meetingId, ?string $joinUrl): ?string
+    {
+        $configured = trim((string) config('services.pathways_webinar.zoom_start_url', ''));
+        if ($configured !== '') {
+            return $configured;
+        }
+
+        if ($meetingId) {
+            $meeting = $this->zoom->getMeeting($meetingId);
+            if (is_array($meeting) && empty($meeting['error'])) {
+                $startUrl = $meeting['start_url'] ?? null;
+                if (is_string($startUrl) && $startUrl !== '') {
+                    return $startUrl;
+                }
+            }
+        }
+
+        return $joinUrl;
+    }
+
+    public function webinarStatus()
+    {
+        $settings = WebinarSetting::current();
+        $joinUrl = $this->pathwaysJoinUrl();
+        $meetingId = $this->zoom->pathwaysMeetingId();
+        $approvedCount = $this->approvedRegistrationCount();
+
+        return response()->json([
+            'approved_participants' => $approvedCount,
+            'can_start' => $approvedCount > 0,
+            'recording_enabled' => (bool) $settings->recording_enabled,
+            'join_url' => $joinUrl,
+            'start_url' => $this->resolvePathwaysStartUrl($meetingId, $joinUrl),
+            'zoom_meeting_id' => $meetingId,
+            'session_started_at' => $settings->session_started_at?->toIso8601String(),
+        ]);
+    }
+
+    public function startWebinar()
+    {
+        $approvedCount = $this->approvedRegistrationCount();
+        if ($approvedCount === 0) {
+            return response()->json([
+                'message' => 'Cannot start the webinar until at least one participant has registered and been approved.',
+                'approved_participants' => 0,
+                'can_start' => false,
+            ], 422);
+        }
+
+        $settings = WebinarSetting::current();
+        $joinUrl = $this->pathwaysJoinUrl();
+        if (!$joinUrl) {
+            return response()->json([
+                'message' => 'Pathways Zoom join URL is not configured on the server.',
+            ], 500);
+        }
+
+        $meetingId = $this->zoom->pathwaysMeetingId();
+        if ($settings->recording_enabled && $meetingId) {
+            $result = $this->zoom->setMeetingAutoRecording($meetingId, true);
+            if ($result === null) {
+                return response()->json([
+                    'message' => 'Unable to contact Zoom to enable cloud recording. Check Zoom API credentials.',
+                ], 503);
+            }
+            if (!empty($result['error'])) {
+                Log::warning('Zoom auto-recording enable failed for pathways webinar', [
+                    'meeting_id' => $meetingId,
+                    'result' => $result,
+                ]);
+            }
+        }
+
+        $settings->session_started_at = now();
+        $settings->save();
+
+        $startUrl = $this->resolvePathwaysStartUrl($meetingId, $joinUrl);
+
+        return response()->json([
+            'message' => 'Webinar ready to start',
+            'approved_participants' => $approvedCount,
+            'start_url' => $startUrl,
+            'join_url' => $joinUrl,
+            'recording_enabled' => (bool) $settings->recording_enabled,
+        ]);
+    }
+
+    public function setWebinarRecording(Request $request)
+    {
+        $data = $request->validate([
+            'enabled' => 'required|boolean',
+        ]);
+
+        $enabled = (bool) $data['enabled'];
+        $meetingId = $this->zoom->pathwaysMeetingId();
+
+        if ($meetingId) {
+            $result = $this->zoom->setMeetingAutoRecording($meetingId, $enabled);
+            if ($result === null) {
+                return response()->json([
+                    'message' => 'Unable to contact Zoom. Check Zoom API credentials in server settings.',
+                ], 503);
+            }
+            if (!empty($result['error'])) {
+                return response()->json([
+                    'message' => 'Zoom rejected the recording setting change.',
+                    'details' => $result['body'] ?? null,
+                ], 502);
+            }
+        }
+
+        $settings = WebinarSetting::current();
+        $settings->recording_enabled = $enabled;
+        $settings->save();
+
+        return response()->json([
+            'message' => $enabled ? 'Cloud recording enabled for this webinar room.' : 'Cloud recording disabled.',
+            'recording_enabled' => $enabled,
+            'zoom_meeting_id' => $meetingId,
+        ]);
+    }
+
+    public function webinarRecordings()
+    {
+        $meetingId = $this->zoom->pathwaysMeetingId();
+        $data = $this->zoom->listRecordings('me');
+
+        if ($data === null) {
+            return response()->json(['message' => 'Unable to contact Zoom for recordings'], 503);
+        }
+
+        if (!empty($data['error'])) {
+            return response()->json([
+                'message' => 'Zoom recordings API error',
+                'details' => $data['body'] ?? null,
+            ], 502);
+        }
+
+        $items = $this->zoom->formatRecordingItems($data);
+
+        if ($meetingId) {
+            $items = array_values(array_filter($items, function ($item) use ($meetingId) {
+                return (string) ($item['id'] ?? '') === (string) $meetingId;
+            }));
+        }
+
+        return response()->json(['recordings' => $items]);
     }
 
     public function index(Request $request)

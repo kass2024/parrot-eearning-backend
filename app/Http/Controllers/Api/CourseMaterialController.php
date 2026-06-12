@@ -7,6 +7,7 @@ use App\Models\Course;
 use App\Models\CourseEnrollment;
 use App\Models\CourseMaterial;
 use App\Support\CourseMaterialHelper;
+use App\Support\LearnerRecordingAccess;
 use App\Services\ZoomService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -45,9 +46,35 @@ class CourseMaterialController extends Controller
             ->orderByDesc('id')
             ->get();
 
+        $courseMeetingIds = $materials
+            ->filter(fn (CourseMaterial $m) => strtolower((string) $m->type) === 'zoom')
+            ->map(fn (CourseMaterial $m) => CourseMaterialHelper::meetingId($m))
+            ->filter()
+            ->reject(fn (?string $id) => LearnerRecordingAccess::isPathwaysWebinarMeeting($id))
+            ->map(fn (?string $id) => (string) $id)
+            ->unique()
+            ->values()
+            ->all();
+
         $liveMeetingIds = app(ZoomService::class)->fetchLiveMeetingIds();
+        $recordingsByMeetingId = LearnerRecordingAccess::filterGroupedRecordings(
+            app(ZoomService::class)->recordingsGroupedByMeetingId(),
+            $courseMeetingIds
+        );
+
         $payload = $materials
-            ->map(fn (CourseMaterial $m) => CourseMaterialHelper::toLearnerArray($m, $liveMeetingIds))
+            ->map(function (CourseMaterial $m) use ($liveMeetingIds, $recordingsByMeetingId) {
+                $arr = CourseMaterialHelper::toLearnerArray($m, $liveMeetingIds);
+
+                if (($arr['kind'] ?? '') === 'zoom') {
+                    $meetingId = CourseMaterialHelper::meetingId($m);
+                    $arr['recordings'] = ($meetingId && isset($recordingsByMeetingId[$meetingId]))
+                        ? $recordingsByMeetingId[$meetingId]
+                        : [];
+                }
+
+                return $arr;
+            })
             ->values();
 
         return response()->json([

@@ -225,10 +225,165 @@ class ZoomService
                 'panelists_video'  => $data['panelists_video'] ?? true,
                 'practice_session' => $data['practice_session'] ?? true,
                 'hd_video'         => $data['hd_video'] ?? true,
+                'auto_recording'   => ($data['auto_recording'] ?? false) ? 'cloud' : 'none',
             ],
         ];
 
         return $client->post("/users/{$userId}/webinars", $payload)->json();
+    }
+
+    public function extractMeetingIdFromJoinUrl(?string $url): ?string
+    {
+        if (!$url) {
+            return null;
+        }
+
+        if (preg_match('#/(?:j|wc)/(\d+)#', $url, $matches)) {
+            return $matches[1];
+        }
+
+        return null;
+    }
+
+    public function pathwaysMeetingId(): ?string
+    {
+        $fromEnv = trim((string) config('services.pathways_webinar.zoom_meeting_id', ''));
+        if ($fromEnv !== '') {
+            return $fromEnv;
+        }
+
+        $joinUrl = (string) config('services.pathways_webinar.zoom_join_url', '');
+
+        return $this->extractMeetingIdFromJoinUrl($joinUrl);
+    }
+
+    public function getMeeting(string $meetingId): ?array
+    {
+        $client = $this->client();
+        if (!$client) {
+            return null;
+        }
+
+        $response = $client->get('/meetings/' . rawurlencode($meetingId));
+        if ($response->failed()) {
+            return [
+                'error' => true,
+                'status' => $response->status(),
+                'body' => $response->json(),
+            ];
+        }
+
+        return $response->json();
+    }
+
+    public function setMeetingAutoRecording(string $meetingId, bool $enabled): ?array
+    {
+        $client = $this->client();
+        if (!$client) {
+            return null;
+        }
+
+        $response = $client->patch('/meetings/' . rawurlencode($meetingId), [
+            'settings' => [
+                'auto_recording' => $enabled ? 'cloud' : 'none',
+            ],
+        ]);
+
+        if ($response->failed()) {
+            return [
+                'error' => true,
+                'status' => $response->status(),
+                'body' => $response->json(),
+            ];
+        }
+
+        return $response->json();
+    }
+
+    /**
+     * @return array<string, list<array<string, mixed>>>
+     */
+    public function recordingsGroupedByMeetingId(string $userId = 'me'): array
+    {
+        $data = $this->listRecordings($userId);
+        if ($data === null || !empty($data['error'])) {
+            return [];
+        }
+
+        $grouped = [];
+
+        foreach (($data['meetings'] ?? []) as $meeting) {
+            $meetingId = (string) ($meeting['id'] ?? '');
+            if ($meetingId === '') {
+                continue;
+            }
+
+            $files = [];
+            foreach (($meeting['recording_files'] ?? []) as $file) {
+                $files[] = [
+                    'id' => $file['id'] ?? null,
+                    'recording_type' => $file['recording_type'] ?? null,
+                    'file_type' => $file['file_type'] ?? null,
+                    'play_url' => $file['play_url'] ?? null,
+                    'download_url' => $file['download_url'] ?? null,
+                ];
+            }
+
+            if (empty($files)) {
+                continue;
+            }
+
+            $grouped[$meetingId][] = [
+                'uuid' => $meeting['uuid'] ?? null,
+                'id' => $meeting['id'] ?? null,
+                'topic' => $meeting['topic'] ?? 'Recorded session',
+                'start_time' => $meeting['start_time'] ?? null,
+                'duration' => $meeting['duration'] ?? null,
+                'files' => $files,
+            ];
+        }
+
+        return $grouped;
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    public function formatRecordingItems(?array $zoomListResponse): array
+    {
+        if ($zoomListResponse === null || !empty($zoomListResponse['error'])) {
+            return [];
+        }
+
+        $items = [];
+
+        foreach (($zoomListResponse['meetings'] ?? []) as $meeting) {
+            $files = [];
+            foreach (($meeting['recording_files'] ?? []) as $file) {
+                $files[] = [
+                    'id' => $file['id'] ?? null,
+                    'recording_type' => $file['recording_type'] ?? null,
+                    'file_type' => $file['file_type'] ?? null,
+                    'play_url' => $file['play_url'] ?? null,
+                    'download_url' => $file['download_url'] ?? null,
+                ];
+            }
+
+            if (empty($files)) {
+                continue;
+            }
+
+            $items[] = [
+                'uuid' => $meeting['uuid'] ?? null,
+                'id' => $meeting['id'] ?? null,
+                'topic' => $meeting['topic'] ?? 'Recorded session',
+                'start_time' => $meeting['start_time'] ?? null,
+                'duration' => $meeting['duration'] ?? null,
+                'files' => $files,
+            ];
+        }
+
+        return $items;
     }
 }
 

@@ -23,6 +23,7 @@ return new class extends Migration
         $this->syncAvailableSchedulesTable();
         $this->syncLiveZoomCohortTable();
         $this->syncInstructorPayoutRequestsTable();
+        $this->syncWebinarSettingsTable();
     }
 
     private function syncUsersTable(): void
@@ -267,6 +268,20 @@ return new class extends Migration
 
             $table->index('instructor_id');
             $table->index('status');
+        });
+    }
+
+    private function syncWebinarSettingsTable(): void
+    {
+        if (Schema::hasTable('webinar_settings')) {
+            return;
+        }
+
+        Schema::create('webinar_settings', function (Blueprint $table) {
+            $table->id();
+            $table->boolean('recording_enabled')->default(false);
+            $table->timestamp('session_started_at')->nullable();
+            $table->timestamps();
         });
     }
 

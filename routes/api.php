@@ -48,6 +48,10 @@ Route::prefix('admin')->group(function () {
     Route::get('auth/google/callback', [AuthController::class, 'handleGoogleCallback']);
 
     // Meeting Registration
+    Route::get('meeting-registrations/webinar/status', [MeetingRegistrationController::class, 'webinarStatus']);
+    Route::post('meeting-registrations/webinar/start', [MeetingRegistrationController::class, 'startWebinar']);
+    Route::post('meeting-registrations/webinar/recording', [MeetingRegistrationController::class, 'setWebinarRecording']);
+    Route::get('meeting-registrations/webinar/recordings', [MeetingRegistrationController::class, 'webinarRecordings']);
     Route::post('meeting-registrations', [MeetingRegistrationController::class, 'store']);
     Route::get('meeting-registrations', [MeetingRegistrationController::class, 'index']);
     Route::put('meeting-registrations/{meetingRegistration}', [MeetingRegistrationController::class, 'update']);
@@ -211,6 +215,7 @@ Route::prefix('admin')->group(function () {
     /*** ---------------- ZOOM ---------------- ***/
     Route::get('zoom/meetings', [ZoomController::class, 'listMeetings']);
     Route::post('zoom/meetings', [ZoomController::class, 'createMeeting']);
+    Route::post('zoom/meetings/{id}/recording', [ZoomController::class, 'setMeetingRecording']);
     Route::delete('zoom/meetings/{id}', [ZoomController::class, 'deleteMeeting']);
     Route::get('zoom/recordings', [ZoomController::class, 'listRecordings']);
     Route::get('zoom/webinars', [ZoomController::class, 'listWebinars']);

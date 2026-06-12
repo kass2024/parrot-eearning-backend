@@ -10,12 +10,17 @@ use App\Models\CoursePayment;
 use App\Models\InstructorPayoutRequest;
 use App\Models\User;
 use App\Support\CourseMaterialHelper;
+use App\Services\ZoomService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class InstructorDashboardController extends Controller
 {
+    public function __construct(protected ZoomService $zoom)
+    {
+    }
+
     private function sharePercent(): float
     {
         return (float) config('app.instructor_share_percent', 70);
@@ -370,6 +375,7 @@ class InstructorDashboardController extends Controller
     {
         $data = $request->validate([
             'instructor_email' => 'required|email',
+            'enable_recording' => 'nullable|boolean',
         ]);
 
         $instructor = $this->findInstructor($data['instructor_email']);
@@ -386,10 +392,35 @@ class InstructorDashboardController extends Controller
             return response()->json(['message' => 'You are not assigned to this course.'], 403);
         }
 
+        $enableRecording = (bool) ($data['enable_recording'] ?? false);
+        $meetingId = CourseMaterialHelper::meetingId($material);
+        $meta = is_array($material->metadata) ? $material->metadata : [];
+
+        if ($enableRecording && $meetingId) {
+            $result = $this->zoom->setMeetingAutoRecording($meetingId, true);
+            if ($result === null) {
+                return response()->json([
+                    'message' => 'Unable to contact Zoom to enable cloud recording.',
+                ], 503);
+            }
+            if (!empty($result['error'])) {
+                return response()->json([
+                    'message' => 'Zoom rejected cloud recording for this live class.',
+                    'details' => $result['body'] ?? null,
+                ], 502);
+            }
+            $meta['recording_enabled'] = true;
+            $material->metadata = $meta;
+            $material->save();
+        }
+
         CourseMaterialHelper::markSessionStarted($material);
 
         return response()->json([
-            'message' => 'Live session marked as started. Learners can join now.',
+            'message' => $enableRecording
+                ? 'Live session started with cloud recording enabled for paid learners.'
+                : 'Live session marked as started. Learners can join now.',
+            'recording_enabled' => (bool) ($meta['recording_enabled'] ?? false),
             'session' => CourseMaterialHelper::toLiveClassArray($material),
         ], 200);
     }

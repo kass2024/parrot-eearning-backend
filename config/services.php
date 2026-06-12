@@ -45,6 +45,8 @@ return [
     'pathways_webinar' => [
         'timezone' => env('PATHWAYS_TIMEZONE', 'Africa/Kigali'),
         'zoom_join_url' => env('PATHWAYS_ZOOM_JOIN_URL', 'https://us06web.zoom.us/j/84024505834?pwd=S35BVbbF5OO8zY1zBMIw59YKw3L5Gx.1'),
+        'zoom_meeting_id' => env('PATHWAYS_ZOOM_MEETING_ID'),
+        'zoom_start_url' => env('PATHWAYS_ZOOM_START_URL'),
     ],
 
     'stripe' => [
