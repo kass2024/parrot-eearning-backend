@@ -375,12 +375,64 @@ class ZoomService
     {
         $host = parse_url($url, PHP_URL_HOST);
 
-        return is_string($host) && preg_match('/(^|\.)zoom\.us$/i', $host) === 1;
+        if (!is_string($host)) {
+            return false;
+        }
+
+        return preg_match('/(^|\.)zoom\.(us|com)$/i', $host) === 1;
     }
 
     public function recordingAccessToken(): ?string
     {
         return $this->getAccessToken();
+    }
+
+    /**
+     * @return array{ok: bool, status?: int, message?: string, headers?: array<string, string>}|null
+     */
+    public function probeRecordingStream(string $url, ?string $range = null, bool $headOnly = false): ?array
+    {
+        if (!$this->isAllowedRecordingUrl($url)) {
+            return ['ok' => false, 'status' => 403, 'message' => 'Invalid recording URL'];
+        }
+
+        $token = $this->getAccessToken();
+        if (!$token) {
+            return ['ok' => false, 'status' => 503, 'message' => 'Zoom token unavailable'];
+        }
+
+        $request = Http::withToken($token)
+            ->withHeaders(array_filter(['Range' => $range]))
+            ->timeout(120);
+
+        $response = $headOnly ? $request->head($url) : $request->withOptions(['stream' => true])->get($url);
+
+        if ($response->failed()) {
+            return [
+                'ok' => false,
+                'status' => $response->status(),
+                'message' => 'Zoom rejected recording stream',
+            ];
+        }
+
+        $headers = [];
+        foreach (['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges'] as $header) {
+            $value = $response->header($header);
+            if ($value) {
+                $headers[$header] = $value;
+            }
+        }
+
+        if (!isset($headers['Content-Type'])) {
+            $headers['Content-Type'] = 'video/mp4';
+        }
+
+        return [
+            'ok' => true,
+            'status' => $response->status(),
+            'headers' => $headers,
+            'response' => $response,
+        ];
     }
 
     /**
@@ -430,31 +482,77 @@ class ZoomService
         }));
 
         usort($filtered, function (array $a, array $b) {
-            $score = function (array $file): int {
-                $type = strtolower((string) ($file['recording_type'] ?? ''));
-                if (strtoupper((string) ($file['file_type'] ?? '')) === 'M4A') {
-                    return 10;
-                }
-                if (str_contains($type, 'shared_screen_with_speaker_view')) {
-                    return 100;
-                }
-                if (str_contains($type, 'shared_screen_with_gallery_view')) {
-                    return 90;
-                }
-                if (str_contains($type, 'active_speaker')) {
-                    return 80;
-                }
-                if (str_contains($type, 'gallery_view')) {
-                    return 70;
-                }
-
-                return 50;
-            };
-
-            return $score($b) <=> $score($a);
+            return self::recordingViewScore($b) <=> self::recordingViewScore($a);
         });
 
-        return $filtered;
+        return array_map(function (array $file) {
+            $file['view_label'] = self::recordingViewLabel(
+                $file['recording_type'] ?? null,
+                $file['file_type'] ?? null
+            );
+
+            return $file;
+        }, $filtered);
+    }
+
+    public static function recordingViewScore(array $file): int
+    {
+        $fileType = strtoupper((string) ($file['file_type'] ?? ''));
+        if ($fileType === 'M4A') {
+            return 10;
+        }
+
+        if ($fileType !== 'MP4') {
+            return 0;
+        }
+
+        $type = strtolower((string) ($file['recording_type'] ?? ''));
+
+        if (str_contains($type, 'shared_screen_with_speaker_view')) {
+            return 100;
+        }
+        if ($type === 'shared_screen' || str_contains($type, 'shared_screen_only')) {
+            return 95;
+        }
+        if (str_contains($type, 'shared_screen_with_gallery_view')) {
+            return 90;
+        }
+        if (str_contains($type, 'gallery_view')) {
+            return 65;
+        }
+        if (str_contains($type, 'active_speaker')) {
+            return 35;
+        }
+
+        return 50;
+    }
+
+    public static function recordingViewLabel(?string $recordingType, ?string $fileType): string
+    {
+        $type = strtolower((string) $recordingType);
+        $file = strtoupper((string) $fileType);
+
+        if ($file === 'M4A') {
+            return 'Audio only';
+        }
+
+        if (str_contains($type, 'shared_screen_with_speaker_view')) {
+            return 'Screen + speakers';
+        }
+        if ($type === 'shared_screen' || str_contains($type, 'shared_screen_only')) {
+            return 'Screen share';
+        }
+        if (str_contains($type, 'shared_screen_with_gallery_view')) {
+            return 'Screen + gallery';
+        }
+        if (str_contains($type, 'gallery_view')) {
+            return 'Gallery view';
+        }
+        if (str_contains($type, 'active_speaker')) {
+            return 'Active speaker';
+        }
+
+        return $file === 'MP4' ? 'Video' : (string) ($fileType ?: 'Recording');
     }
 
     /**
@@ -822,7 +920,17 @@ class ZoomService
             $normalized = $this->normalizeRecordingMeeting(is_array($meeting) ? $meeting : []);
             $files = [];
             foreach (($normalized['recording_files'] ?? []) as $file) {
-                $files[] = $file;
+                $files[] = [
+                    'id' => $file['id'] ?? null,
+                    'recording_type' => $file['recording_type'] ?? null,
+                    'file_type' => $file['file_type'] ?? null,
+                    'play_url' => $file['play_url'] ?? null,
+                    'download_url' => $file['download_url'] ?? null,
+                    'view_label' => $file['view_label'] ?? self::recordingViewLabel(
+                        $file['recording_type'] ?? null,
+                        $file['file_type'] ?? null
+                    ),
+                ];
             }
 
             if (empty($files)) {

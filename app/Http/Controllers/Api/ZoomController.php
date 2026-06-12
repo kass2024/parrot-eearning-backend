@@ -78,43 +78,73 @@ class ZoomController extends Controller
 
     public function streamRecording(Request $request)
     {
+        $corsHeaders = $this->recordingStreamCorsHeaders($request);
+
+        if ($request->isMethod('OPTIONS')) {
+            return response('', 204, $corsHeaders);
+        }
+
         $request->validate([
             'url' => 'required|url|max:4000',
         ]);
 
         $url = (string) $request->query('url');
         $range = $request->header('Range');
-        $response = $this->zoom->fetchRecordingStream($url, $range);
+        $headOnly = $request->isMethod('HEAD');
 
-        if ($response === null) {
-            return response()->json(['message' => 'Unable to stream this recording'], 502);
-        }
+        $probe = $this->zoom->probeRecordingStream($url, $range, $headOnly);
 
-        if ($response->failed()) {
+        if ($probe === null || empty($probe['ok'])) {
             return response()->json([
-                'message' => 'Zoom rejected the recording stream request',
-                'status' => $response->status(),
-            ], $response->status());
+                'message' => $probe['message'] ?? 'Unable to stream this recording',
+            ], $probe['status'] ?? 502);
         }
 
-        $forwardHeaders = [];
-        foreach (['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges'] as $header) {
-            $value = $response->header($header);
-            if ($value) {
-                $forwardHeaders[$header] = $value;
-            }
+        $forwardHeaders = array_merge($corsHeaders, $probe['headers']);
+
+        if ($headOnly) {
+            return response('', $probe['status'], $forwardHeaders);
         }
+
+        /** @var \Illuminate\Http\Client\Response $response */
+        $response = $probe['response'];
 
         return response()->stream(function () use ($response) {
             $body = $response->toPsrResponse()->getBody();
             while (!$body->eof()) {
-                echo $body->read(1024 * 64);
+                echo $body->read(1024 * 128);
                 if (ob_get_level() > 0) {
                     ob_flush();
                 }
                 flush();
             }
-        }, $response->status(), $forwardHeaders);
+        }, $probe['status'], $forwardHeaders);
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function recordingStreamCorsHeaders(Request $request): array
+    {
+        $allowed = array_values(array_unique(array_filter([
+            rtrim((string) config('app.frontend_url'), '/'),
+            'https://elearning.xanderglobalscholars.com',
+            'http://localhost:8080',
+            'http://127.0.0.1:8080',
+        ])));
+
+        $origin = (string) $request->headers->get('Origin', '');
+        $allowOrigin = in_array($origin, $allowed, true)
+            ? $origin
+            : ($allowed[0] ?? '*');
+
+        return [
+            'Access-Control-Allow-Origin' => $allowOrigin,
+            'Access-Control-Allow-Methods' => 'GET, HEAD, OPTIONS',
+            'Access-Control-Allow-Headers' => 'Range, Accept, Content-Type, Origin',
+            'Access-Control-Expose-Headers' => 'Content-Length, Content-Range, Accept-Ranges, Content-Type',
+            'Vary' => 'Origin',
+        ];
     }
 
     public function createMeeting(Request $request)
