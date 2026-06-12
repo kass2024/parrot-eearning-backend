@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Course;
 use App\Models\CourseEnrollment;
 use App\Models\CoursePayment;
+use App\Models\InstructorPayoutRequest;
 use App\Models\MeetingRegistration;
 use App\Models\Student;
 use App\Models\User;
@@ -148,6 +149,14 @@ class AdminReportsController extends Controller
             ->whereIn('status', ['pending', 'processing'])
             ->count();
 
+        $pendingPayoutRequests = InstructorPayoutRequest::query()
+            ->whereIn('status', ['pending', 'processing'])
+            ->count();
+
+        $pendingPayoutAmount = (float) InstructorPayoutRequest::query()
+            ->whereIn('status', ['pending', 'processing'])
+            ->sum('amount');
+
         $meetingStats = [
             'total' => MeetingRegistration::count(),
             'pending' => MeetingRegistration::whereRaw('LOWER(COALESCE(status, "")) = ?', ['pending'])->count(),
@@ -168,6 +177,8 @@ class AdminReportsController extends Controller
                 'pendingInstructors' => $pendingInstructors,
                 'pendingCourses' => $pendingCourses,
                 'pendingPayments' => $pendingPayments,
+                'pendingPayoutRequests' => $pendingPayoutRequests,
+                'pendingPayoutAmount' => round($pendingPayoutAmount, 2),
                 'paymentProvider' => 'Stripe',
             ],
             'enrollmentsByMonth' => $enrollmentsByMonth,

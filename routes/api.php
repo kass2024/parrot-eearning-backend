@@ -15,6 +15,7 @@ use App\Http\Controllers\Api\MeetingRegistrationController;
 use App\Http\Controllers\Api\AvailableScheduleController;
 use App\Http\Controllers\Api\LiveZoomCohortController;
 use App\Http\Controllers\Api\PaymentController;
+use App\Http\Controllers\Api\AdminPayoutController;
 use App\Http\Controllers\Api\AdminReportsController;
 use App\Http\Controllers\Api\SystemController;
 use App\Http\Controllers\Api\InstructorDashboardController;
@@ -183,6 +184,11 @@ Route::prefix('admin')->group(function () {
     // Dashboard metrics
     Route::get('dashboard/metrics', [ProgramManagementController::class, 'getDashboardMetrics']);
     Route::get('dashboard/analytics', [AdminReportsController::class, 'analytics']);
+
+    /*** ---------------- INSTRUCTOR PAYOUTS (ADMIN) ---------------- ***/
+    Route::get('instructor-payouts', [AdminPayoutController::class, 'index']);
+    Route::post('instructor-payouts/{payout}/approve', [AdminPayoutController::class, 'approve']);
+    Route::post('instructor-payouts/{payout}/reject', [AdminPayoutController::class, 'reject']);
 
     /*** ---------------- COURSES ---------------- ***/
     Route::get('courses', [CourseController::class, 'index']);
