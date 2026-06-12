@@ -514,8 +514,8 @@ class CourseController extends Controller
         return response()->json([
             'enrollments' => $enrollments->map(function ($enrollment) {
                 return [
-                    'course_id' => $enrollment->course_id,
-                    'status' => $enrollment->status,
+                    'course_id' => (int) $enrollment->course_id,
+                    'status' => (string) ($enrollment->status ?? 'enrolled'),
                     'level' => $enrollment->level,
                 ];
             }),

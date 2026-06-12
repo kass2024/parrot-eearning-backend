@@ -327,7 +327,9 @@ class LearnerDashboardController extends Controller
 
 
 
-        $enrollmentStatuses = $enrollments->keyBy('course_id')->map(fn ($e) => $e->status);
+        $enrollmentStatuses = $enrollments->keyBy('course_id')->map(
+            fn ($e) => strtolower(trim((string) ($e->status ?? 'enrolled')))
+        );
 
 
 
