@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Course;
 use App\Models\CourseEnrollment;
 use App\Models\CoursePayment;
+use App\Support\FrontendUrl;
 use Stripe\Checkout\Session as StripeCheckoutSession;
 use Stripe\PaymentIntent;
 use Stripe\Stripe;
@@ -86,7 +87,7 @@ class StripePaymentService
             ];
         }
 
-        $frontend = rtrim((string) config('app.frontend_url', config('app.url')), '/');
+        $frontend = FrontendUrl::base();
 
         $this->configureStripe();
 
