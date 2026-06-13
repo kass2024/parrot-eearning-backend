@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Models\CourseEnrollment;
 use App\Models\Student;
 use App\Models\CourseMaterial;
+use App\Support\ApiListCache;
 use Illuminate\Support\Facades\Log;
 use App\Mail\CourseAppliedMail;
 use App\Mail\CourseEnrollmentApprovedMail;
@@ -33,7 +34,11 @@ class CourseController extends Controller
     }
     public function index()
     {
-        return response()->json(Course::orderByDesc('id')->get(), 200);
+        $courses = ApiListCache::remember('courses', 'all', 120, function () {
+            return Course::orderByDesc('id')->get();
+        });
+
+        return response()->json($courses, 200);
     }
 
     public function store(Request $request)
@@ -64,6 +69,8 @@ class CourseController extends Controller
         }
 
         $course = Course::create($payload);
+
+        $this->bumpCourseCaches();
 
         return response()->json([
             'message' => 'Course created',
@@ -97,6 +104,8 @@ class CourseController extends Controller
 
         $course->save();
 
+        $this->bumpCourseCaches();
+
         return response()->json([
             'message' => 'Course updated',
             'course' => $course,
@@ -106,6 +115,8 @@ class CourseController extends Controller
     public function destroy(Course $course)
     {
         $course->delete();
+        $this->bumpCourseCaches();
+
         return response()->json(['message' => 'Course deleted']);
     }
 
@@ -118,6 +129,8 @@ class CourseController extends Controller
         $user = User::findOrFail($data['user_id']);
 
         $user->assignedCourses()->syncWithoutDetaching([$course->id]);
+
+        $this->bumpCourseCaches();
 
         return response()->json([
             'message' => 'Course assigned to user',
@@ -134,9 +147,18 @@ class CourseController extends Controller
 
         $user->assignedCourses()->detach($course->id);
 
+        $this->bumpCourseCaches();
+
         return response()->json([
             'message' => 'Course unassigned from user',
         ]);
+    }
+
+    protected function bumpCourseCaches(): void
+    {
+        ApiListCache::bump('courses');
+        ApiListCache::bump('instructors');
+        ApiListCache::bump('analytics');
     }
 
     public function enroll(Request $request, Course $course)

@@ -41,7 +41,7 @@ class ZoomController extends Controller
         return response()->json(array_merge(is_array($data) ? $data : [], ['meetings' => $meetings]), 200);
     }
 
-    public function listRecordings()
+    public function listRecordings(Request $request)
     {
         if (!$this->zoom->isConfigured()) {
             return response()->json([
@@ -51,8 +51,9 @@ class ZoomController extends Controller
             ], 200);
         }
 
+        $refresh = $request->boolean('refresh');
         $trackedIds = AdminRecordingCatalog::trackedMeetingIds();
-        $collected = $this->zoom->collectAllCloudRecordings($trackedIds, 12);
+        $collected = $this->zoom->cachedCloudRecordings($trackedIds, 6, $refresh);
 
         $items = AdminRecordingCatalog::filterPlatformOnly(
             AdminRecordingCatalog::annotateItems(
@@ -73,6 +74,7 @@ class ZoomController extends Controller
             'load_strategies' => $collected['strategies'],
             'zoom_errors' => $collected['errors'],
             'scope_hint' => $scopeHint,
+            'cached' => (bool) ($collected['cached'] ?? false),
         ], 200);
     }
 
@@ -271,6 +273,8 @@ class ZoomController extends Controller
                 'details' => $result['body'] ?? null,
             ], $result['status'] ?? 502);
         }
+
+        $this->zoom->bumpRecordingsCacheVersion();
 
         return response()->json([
             'message' => $result['message'] ?? 'Recording deleted from Zoom cloud',

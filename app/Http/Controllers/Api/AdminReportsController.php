@@ -10,12 +10,22 @@ use App\Models\InstructorPayoutRequest;
 use App\Models\MeetingRegistration;
 use App\Models\Student;
 use App\Models\User;
+use App\Support\ApiListCache;
 use App\Support\CourseRevenueCalculator;
 use Carbon\Carbon;
 
 class AdminReportsController extends Controller
 {
     public function analytics()
+    {
+        $payload = ApiListCache::remember('analytics', 'admin_dashboard', 180, function () {
+            return $this->buildAnalyticsPayload();
+        });
+
+        return response()->json($payload, 200);
+    }
+
+    protected function buildAnalyticsPayload(): array
     {
         $now = Carbon::now();
         $months = collect(range(5, 0))->map(function ($i) use ($now) {
@@ -124,7 +134,7 @@ class AdminReportsController extends Controller
             'rejected' => MeetingRegistration::whereRaw('LOWER(COALESCE(status, "")) = ?', ['rejected'])->count(),
         ];
 
-        return response()->json([
+        return [
             'summary' => [
                 'totalStudents' => Student::count(),
                 'totalCourses' => Course::count(),
@@ -148,6 +158,6 @@ class AdminReportsController extends Controller
             'coursePerformance' => $coursePerformance,
             'studentsByCountry' => $studentsByCountry,
             'marketing' => $meetingStats,
-        ], 200);
+        ];
     }
 }

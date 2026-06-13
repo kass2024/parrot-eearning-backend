@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Student;
+use App\Support\ApiListCache;
 use App\Services\MailDeliveryService;
 use App\Services\StudentRegistrationEmailService;
 
@@ -12,7 +13,14 @@ class StudentController extends Controller
 {
     public function index()
     {
-        return response()->json(Student::orderByDesc('id')->get(), 200);
+        $students = ApiListCache::remember('students', 'all', 120, function () {
+            return Student::query()
+                ->select(['id', 'first_name', 'last_name', 'name', 'email', 'status', 'phone', 'country', 'primary_goal', 'created_at'])
+                ->orderByDesc('id')
+                ->get();
+        });
+
+        return response()->json($students, 200);
     }
 
     public function store(Request $request)
@@ -51,7 +59,15 @@ class StudentController extends Controller
             $selectedCourses
         );
 
+        $this->bumpStudentCaches();
+
         return response()->json(['message' => 'Student created', 'student' => $student], 201);
+    }
+
+    protected function bumpStudentCaches(): void
+    {
+        ApiListCache::bump('students');
+        ApiListCache::bump('analytics');
     }
 
     public function update(Request $request, $id)
@@ -70,12 +86,16 @@ class StudentController extends Controller
         // Apply all validated fields (only columns that exist in the table)
         $student->fill($validated);
         $student->save();
+        $this->bumpStudentCaches();
+
         return response()->json(['message' => 'Student updated', 'student' => $student]);
     }
 
     public function destroy($id)
     {
         Student::findOrFail($id)->delete();
+        $this->bumpStudentCaches();
+
         return response()->json(['message' => 'Student deleted']);
     }
 

@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\User;
+use App\Support\ApiListCache;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 
@@ -12,15 +13,26 @@ class UserController extends Controller
 {
     public function index()
     {
-        return response()->json(User::orderByDesc('id')->get(), 200);
+        $users = ApiListCache::remember('users', 'all', 120, function () {
+            return User::query()
+                ->select(['id', 'name', 'email', 'role', 'status', 'phone', 'created_at'])
+                ->orderByDesc('id')
+                ->get();
+        });
+
+        return response()->json($users, 200);
     }
 
     public function instructorsWithCourses()
     {
-        $instructors = User::where('role', 'instructor')
-            ->with(['assignedCourses'])
-            ->orderByDesc('id')
-            ->get();
+        $instructors = ApiListCache::remember('instructors', 'with_courses', 120, function () {
+            return User::query()
+                ->where('role', 'instructor')
+                ->select(['id', 'name', 'email', 'role', 'status', 'phone'])
+                ->with(['assignedCourses:id,title,status'])
+                ->orderByDesc('id')
+                ->get();
+        });
 
         return response()->json($instructors, 200);
     }
@@ -144,6 +156,11 @@ class UserController extends Controller
 
         $user = User::create($data);
 
+        ApiListCache::bump('users');
+        if (($data['role'] ?? '') === 'instructor') {
+            ApiListCache::bump('instructors');
+        }
+
         return response()->json([
             'message' => 'User created',
             'user' => $user->makeHidden(['password']),
@@ -212,6 +229,9 @@ class UserController extends Controller
         $user->fill($data);
         $user->save();
 
+        ApiListCache::bump('users');
+        ApiListCache::bump('instructors');
+
         return response()->json([
             'message' => 'User updated',
             'user' => $user->makeHidden(['password']),
@@ -221,6 +241,9 @@ class UserController extends Controller
     public function destroy(User $user)
     {
         $user->delete();
+        ApiListCache::bump('users');
+        ApiListCache::bump('instructors');
+
         return response()->json(['message' => 'User deleted']);
     }
 }

@@ -254,7 +254,7 @@ class ZoomService
      * @param  list<string>  $meetingIds
      * @return array{meetings: list<array<string, mixed>>, errors: list<string>, strategies: list<string>}
      */
-    public function collectAllCloudRecordings(array $meetingIds = [], int $monthsBack = 12): array
+    public function collectAllCloudRecordings(array $meetingIds = [], int $monthsBack = 6, bool $onlyMissingMeetingIds = true): array
     {
         $meetingsByKey = [];
         $errors = [];
@@ -291,13 +291,31 @@ class ZoomService
             }
         };
 
-        foreach ($this->hostUserCandidates() as $host) {
-            $merge($this->listRecordings($host, $monthsBack), 'user:' . $host);
-        }
-
+        // Prefer account-level list (one sweep) before per-user/per-meeting calls.
         $merge($this->listAccountRecordings($monthsBack), 'account');
 
+        if ($meetingsByKey === []) {
+            foreach ($this->hostUserCandidates() as $host) {
+                $merge($this->listRecordings($host, $monthsBack), 'user:' . $host);
+                if ($meetingsByKey !== []) {
+                    break;
+                }
+            }
+        }
+
+        $knownMeetingIds = [];
+        foreach ($meetingsByKey as $meeting) {
+            $id = (string) ($meeting['id'] ?? '');
+            if ($id !== '') {
+                $knownMeetingIds[$id] = true;
+            }
+        }
+
         foreach (array_unique(array_filter(array_map('strval', $meetingIds))) as $meetingId) {
+            if ($onlyMissingMeetingIds && isset($knownMeetingIds[$meetingId])) {
+                continue;
+            }
+
             $single = $this->getMeetingRecordings($meetingId);
             if ($single === null) {
                 continue;
@@ -315,6 +333,7 @@ class ZoomService
 
             $key = (string) ($normalized['uuid'] ?? $normalized['id'] ?? $meetingId);
             $meetingsByKey[$key] = $normalized;
+            $knownMeetingIds[$meetingId] = true;
             $strategies[] = 'meeting:' . $meetingId;
         }
 
@@ -893,12 +912,63 @@ class ZoomService
     }
 
     /**
+     * Cached Zoom cloud recording fetch (shared by admin list + course materials).
+     *
+     * @param  list<string>  $meetingIds
+     * @return array{meetings: list<array<string, mixed>>, errors: list<string>, strategies: list<string>, cached: bool}
+     */
+    public function cachedCloudRecordings(array $meetingIds = [], int $monthsBack = 6, bool $refresh = false): array
+    {
+        if ($refresh) {
+            $this->bumpRecordingsCacheVersion();
+        }
+
+        $ids = array_values(array_unique(array_filter(array_map('strval', $meetingIds))));
+        sort($ids);
+        $cacheKey = $this->recordingsCacheKey($monthsBack, $ids);
+
+        $cached = Cache::get($cacheKey);
+        if (is_array($cached)) {
+            $cached['cached'] = true;
+
+            return $cached;
+        }
+
+        $collected = $this->collectAllCloudRecordings($ids, $monthsBack, true);
+        $collected['cached'] = false;
+        Cache::put($cacheKey, $collected, now()->addMinutes(5));
+
+        return $collected;
+    }
+
+    public function bumpRecordingsCacheVersion(): void
+    {
+        Cache::put('zoom_recordings_cache_version', $this->recordingsCacheVersion() + 1, now()->addDays(30));
+    }
+
+    /**
+     * @param  list<string>  $meetingIds
+     */
+    protected function recordingsCacheKey(int $monthsBack, array $meetingIds): string
+    {
+        return 'zoom_cloud_recordings_v4_'
+            . $this->recordingsCacheVersion() . '_'
+            . $monthsBack . '_'
+            . md5(json_encode($meetingIds));
+    }
+
+    protected function recordingsCacheVersion(): int
+    {
+        return (int) Cache::get('zoom_recordings_cache_version', 1);
+    }
+
+    /**
      * @return array<string, list<array<string, mixed>>>
      */
     public function recordingsGroupedByMeetingId(?string $userId = null): array
     {
         $tracked = array_keys(\App\Support\AdminRecordingCatalog::sourceByMeetingId());
-        $data = $this->collectAllCloudRecordings($tracked, 12);
+        $data = $this->cachedCloudRecordings($tracked, 6, false);
         if (empty($data['meetings'])) {
             return [];
         }
