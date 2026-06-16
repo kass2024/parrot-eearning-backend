@@ -16,6 +16,19 @@ use Illuminate\Support\Facades\Storage;
 
 class CourseMaterialController extends Controller
 {
+    /**
+     * Material rows are keyed by globally unique id; the course segment in the URL
+     * is the client context and may differ after course-switch UI races.
+     */
+    private function materialCourse(Course $course, CourseMaterial $material): Course
+    {
+        if ((int) $material->course_id === (int) $course->id) {
+            return $course;
+        }
+
+        return Course::query()->findOrFail((int) $material->course_id);
+    }
+
     public function index(Request $request, Course $course)
     {
         $includeRecordings = $request->boolean('include_recordings');
@@ -141,9 +154,7 @@ class CourseMaterialController extends Controller
 
     public function update(Request $request, Course $course, CourseMaterial $material)
     {
-        if ($material->course_id !== $course->id) {
-            return response()->json(['message' => 'Material does not belong to this course'], 400);
-        }
+        $this->materialCourse($course, $material);
 
         $data = $request->validate([
             'title' => 'sometimes|required|string|max:255',
@@ -164,10 +175,6 @@ class CourseMaterialController extends Controller
 
     public function destroy(Course $course, CourseMaterial $material)
     {
-        if ($material->course_id !== $course->id) {
-            return response()->json(['message' => 'Material does not belong to this course'], 400);
-        }
-
         $meta = is_array($material->metadata) ? $material->metadata : [];
         $fileId = MaterialFileHelper::pcloudFileId($meta);
         if ($fileId && app(PCloudService::class)->isConfigured()) {
@@ -323,15 +330,13 @@ class CourseMaterialController extends Controller
 
     public function streamMaterial(Request $request, Course $course, CourseMaterial $material, PCloudService $pcloud)
     {
-        if ($material->course_id !== $course->id) {
-            return response()->json(['message' => 'Material does not belong to this course'], 404);
-        }
+        $ownerCourse = $this->materialCourse($course, $material);
 
         $studentId = $request->query('student_id');
         if ($studentId) {
             $allowed = CourseEnrollment::query()
                 ->where('student_id', $studentId)
-                ->where('course_id', $course->id)
+                ->where('course_id', $ownerCourse->id)
                 ->whereIn('status', ['paid', 'completed'])
                 ->exists();
 
