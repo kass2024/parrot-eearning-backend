@@ -401,6 +401,16 @@ class CourseMaterialHelper
             ];
         }
 
+        if (in_array($kind, ['quiz', 'assessment'], true)) {
+            $fileExtras['topic'] = $meta['topic'] ?? null;
+            $fileExtras['question_count'] = count($meta['questions'] ?? []);
+            $fileExtras['has_interactive_quiz'] = count($meta['questions'] ?? []) > 0
+                && (!array_key_exists('status', $meta) || ($meta['status'] ?? '') === 'published');
+            $fileExtras['passing_score'] = (int) ($meta['passing_score'] ?? 70);
+            $fileExtras['time_limit_minutes'] = !empty($meta['time_limit_minutes']) ? (int) $meta['time_limit_minutes'] : null;
+            $fileExtras['quiz_status'] = $meta['status'] ?? 'draft';
+        }
+
 
 
         return array_merge([

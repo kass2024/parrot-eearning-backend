@@ -57,8 +57,36 @@ return [
 
     'pcloud' => [
         'access_token' => env('PCLOUD_ACCESS_TOKEN'),
+        'root_folder_id' => env('PCLOUD_ROOT_FOLDER_ID'),
         'root_folder' => env('PCLOUD_ROOT_FOLDER', 'parrotacademy'),
         'base_url' => env('PCLOUD_API_URL', 'https://api.pcloud.com'),
+    ],
+
+    'anthropic' => [
+        'api_key' => env('ANTHROPIC_API_KEY'),
+        'model' => env('ANTHROPIC_MODEL', 'claude-sonnet-4-6'),
+    ],
+
+    'gemini' => [
+        'api_key' => env('GOOGLE_AI_API_KEY') ?: env('GEMINI_API_KEY'),
+        'model' => env('GEMINI_MODEL', env('GOOGLE_AI_MODEL', 'gemini-2.5-flash')),
+        'stt_model' => env('GEMINI_STT_MODEL', env('GEMINI_MODEL', 'gemini-2.5-flash')),
+    ],
+
+    'quiz_ai' => [
+        'generation_provider' => env('QUIZ_AI_GENERATION_PROVIDER', 'gemini'),
+        'generation_model' => env('QUIZ_AI_GENERATION_MODEL'),
+        'claude_generation_model' => env('QUIZ_AI_CLAUDE_MODEL'),
+        'fast_generation_model' => env('QUIZ_AI_FAST_MODEL'),
+        'prefer_gemini_for_speed' => filter_var(env('QUIZ_AI_PREFER_GEMINI_SPEED', true), FILTER_VALIDATE_BOOL),
+        'use_ai_knowledge_map' => filter_var(env('QUIZ_AI_USE_AI_KNOWLEDGE_MAP', false), FILTER_VALIDATE_BOOL),
+        'enable_embeddings' => filter_var(env('QUIZ_AI_ENABLE_EMBEDDINGS', false), FILTER_VALIDATE_BOOL),
+        'enable_media_transcription' => filter_var(env('QUIZ_AI_ENABLE_MEDIA_TRANSCRIPTION', false), FILTER_VALIDATE_BOOL),
+        'embedding_model' => env('QUIZ_AI_EMBEDDING_MODEL', 'text-embedding-004'),
+        'max_material_chars' => (int) env('QUIZ_AI_MAX_MATERIAL_CHARS', 18000),
+        'material_cache_ttl' => (int) env('QUIZ_AI_MATERIAL_CACHE_TTL', 3600),
+        'marking_primary' => env('QUIZ_AI_MARKING_PRIMARY', 'gemini'),
+        'marking_secondary' => env('QUIZ_AI_MARKING_SECONDARY', 'claude'),
     ],
 
 ];

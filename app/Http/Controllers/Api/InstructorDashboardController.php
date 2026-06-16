@@ -9,6 +9,7 @@ use App\Models\CourseMaterial;
 use App\Models\InstructorPayoutRequest;
 use App\Models\User;
 use App\Support\CourseMaterialHelper;
+use App\Support\QuizMaterialHelper;
 use App\Support\CourseRevenueCalculator;
 use App\Services\ZoomService;
 use Carbon\Carbon;
@@ -562,16 +563,30 @@ class InstructorDashboardController extends Controller
             ->whereIn('type', ['quiz', 'assessment'])
             ->orderByDesc('id')
             ->get()
-            ->map(fn (CourseMaterial $m) => [
-                'id' => $m->id,
-                'course_id' => $m->course_id,
-                'course_title' => $m->course->title ?? 'Course',
-                'title' => $m->title,
-                'description' => $m->description,
-                'type' => $m->type,
-                'resource_url' => $m->resource_url,
-                'created_at' => $m->created_at?->toIso8601String(),
-            ])
+            ->map(function (CourseMaterial $m) {
+                $meta = is_array($m->metadata) ? $m->metadata : [];
+
+                return [
+                    'id' => $m->id,
+                    'course_id' => $m->course_id,
+                    'course_title' => $m->course->title ?? 'Course',
+                    'title' => $m->title,
+                    'description' => $m->description,
+                    'topic' => $meta['topic'] ?? null,
+                    'type' => $m->type,
+                    'resource_url' => $m->resource_url,
+                    'question_count' => count($meta['questions'] ?? []),
+                    'passing_score' => (int) ($meta['passing_score'] ?? 70),
+                    'time_limit_minutes' => QuizMaterialHelper::timeLimitMinutes($m),
+                    'status' => QuizMaterialHelper::quizStatus($m),
+                    'published_student_count' => count(QuizMaterialHelper::publishedStudentIds($m)),
+                    'published_student_ids' => QuizMaterialHelper::publishedStudentIds($m),
+                    'publish_to_all' => QuizMaterialHelper::isPublished($m) && empty(QuizMaterialHelper::publishedStudentIds($m)),
+                    'ai_generated' => (bool) ($meta['ai_generated'] ?? false),
+                    'created_at' => $m->created_at?->toIso8601String(),
+                    'published_at' => $meta['published_at'] ?? null,
+                ];
+            })
             ->values();
 
         return response()->json([

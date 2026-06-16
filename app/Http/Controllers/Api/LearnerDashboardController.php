@@ -546,35 +546,31 @@ class LearnerDashboardController extends Controller
             $cohortQuery = LiveZoomCohort::query()->where('is_active', true)->orderBy('day_of_week')->limit(4);
 
             $cohorts = $cohortQuery->get()->map(function (LiveZoomCohort $c) {
-
-                $joinUrl = null;
-
-                if (Schema::hasColumn('livezoom_cohort', 'zoom_link')) {
-
-                    $joinUrl = $c->zoom_link ?? null;
-
-                }
-
-
+                $joinUrl = Schema::hasColumn('livezoom_cohort', 'zoom_link') ? ($c->zoom_link ?? null) : null;
+                $sessionStatus = Schema::hasColumn('livezoom_cohort', 'session_status')
+                    ? ($c->session_status ?? 'idle')
+                    : 'idle';
+                $isLive = $sessionStatus === 'live';
+                $queueEnabled = Schema::hasTable('livezoom_cohort_queue_entries')
+                    && Schema::hasColumn('livezoom_cohort', 'session_status');
 
                 return [
-
                     'id' => $c->id,
-
                     'title' => $c->notes ?: 'Weekly live cohort',
-
                     'course_title' => 'Live cohort schedule',
-
-                    'join_url' => $joinUrl,
-
-                    'start_time' => null,
-
+                    'join_url' => $queueEnabled ? null : $joinUrl,
+                    'start_time' => Schema::hasColumn('livezoom_cohort', 'session_started_at')
+                        ? $c->session_started_at?->toIso8601String()
+                        : null,
                     'type' => 'cohort',
-
-                    'is_live_now' => false,
-
+                    'is_live_now' => $isLive,
+                    'session_status' => $sessionStatus,
+                    'queue_enabled' => $queueEnabled,
+                    'day_of_week' => $c->day_of_week ?? null,
+                    'slot_start_time' => $c->start_time ?? null,
+                    'slot_end_time' => $c->end_time ?? null,
+                    'timezone' => $c->timezone ?? null,
                 ];
-
             });
 
 

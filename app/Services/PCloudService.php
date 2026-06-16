@@ -15,6 +15,8 @@ class PCloudService
 
     protected string $rootFolder;
 
+    protected ?int $rootFolderId = null;
+
     public function __construct()
     {
         $this->baseUrl = rtrim((string) config('services.pcloud.base_url', 'https://api.pcloud.com'), '/');
@@ -23,6 +25,11 @@ class PCloudService
             ? trim($token, " \t\n\r\0\x0B\"'")
             : null;
         $this->rootFolder = trim((string) config('services.pcloud.root_folder', 'parrotacademy'), '/');
+
+        $rootId = config('services.pcloud.root_folder_id') ?: env('PCLOUD_ROOT_FOLDER_ID');
+        if (is_numeric($rootId) && (int) $rootId > 0) {
+            $this->rootFolderId = (int) $rootId;
+        }
     }
 
     public function isConfigured(): bool
@@ -30,8 +37,17 @@ class PCloudService
         return !empty($this->accessToken);
     }
 
+    public function rootFolderId(): ?int
+    {
+        return $this->rootFolderId;
+    }
+
     public function courseFolderPath(int $courseId): string
     {
+        if ($this->rootFolderId) {
+            return '/course-' . $courseId;
+        }
+
         return '/' . $this->rootFolder . '/course-' . $courseId;
     }
 
@@ -55,16 +71,26 @@ class PCloudService
     public function fileInCourseFolder(int $courseId, int $fileId): bool
     {
         $this->assertConfigured();
+        $courseFolder = $this->ensureCourseFolder($courseId);
+        $courseFolderId = (int) ($courseFolder['folderid'] ?? 0);
+
         $response = $this->request('GET', '/stat', ['fileid' => $fileId]);
 
         if (($response['result'] ?? 1) !== 0) {
             return false;
         }
 
-        $path = (string) ($response['metadata']['path'] ?? '');
+        $meta = is_array($response['metadata'] ?? null) ? $response['metadata'] : [];
+        $parentFolderId = (int) ($meta['parentfolderid'] ?? 0);
+
+        if ($courseFolderId > 0 && $parentFolderId === $courseFolderId) {
+            return true;
+        }
+
+        $path = (string) ($meta['path'] ?? '');
         $prefix = $this->courseFolderPath($courseId);
 
-        return $path === $prefix || str_starts_with($path, $prefix . '/');
+        return $path === $prefix || str_starts_with($path, rtrim($prefix, '/') . '/');
     }
 
     public function uploadBaseUrl(): string
@@ -79,10 +105,14 @@ class PCloudService
     {
         $this->assertConfigured();
 
+        if ($this->rootFolderId) {
+            return $this->ensureCourseFolderUnderRootId($courseId);
+        }
+
         $rootPath = '/' . $this->rootFolder;
         $this->ensureFolderPath($rootPath);
 
-        $coursePath = $this->courseFolderPath($courseId);
+        $coursePath = '/' . $this->rootFolder . '/course-' . $courseId;
         $folder = $this->ensureFolderPath($coursePath);
 
         return [
@@ -92,13 +122,44 @@ class PCloudService
     }
 
     /**
+     * @return array{folderid: int, path: string}
+     */
+    protected function ensureCourseFolderUnderRootId(int $courseId): array
+    {
+        $name = 'course-' . $courseId;
+
+        $response = $this->request('GET', '/createfolderifnotexists', [
+            'folderid' => $this->rootFolderId,
+            'name' => $name,
+        ]);
+
+        if (($response['result'] ?? 1) !== 0) {
+            $response = $this->request('GET', '/createfolder', [
+                'folderid' => $this->rootFolderId,
+                'name' => $name,
+            ]);
+        }
+
+        $this->assertOk($response, 'Unable to create course folder in pCloud');
+
+        $meta = is_array($response['metadata'] ?? null) ? $response['metadata'] : [];
+
+        return [
+            'folderid' => (int) ($meta['folderid'] ?? $meta['id'] ?? 0),
+            'path' => (string) ($meta['path'] ?? ('/course-' . $courseId)),
+        ];
+    }
+
+    /**
      * @return list<array<string, mixed>>
      */
     public function listCourseFiles(int $courseId): array
     {
         $this->assertConfigured();
-        $path = $this->courseFolderPath($courseId);
-        $response = $this->request('GET', '/listfolder', ['path' => $path]);
+        $folder = $this->ensureCourseFolder($courseId);
+        $folderId = (int) ($folder['folderid'] ?? 0);
+
+        $response = $this->request('GET', '/listfolder', ['folderid' => $folderId]);
 
         if (($response['result'] ?? 1) === 2005) {
             $this->ensureCourseFolder($courseId);

@@ -19,6 +19,7 @@ class DatabaseSchemaService
         'meeting_registrations' => ['id', 'email', 'status'],
         'available_schedules' => ['id'],
         'livezoom_cohort' => ['id'],
+        'livezoom_cohort_queue_entries' => ['id'],
     ];
 
     public function databaseConnected(): bool

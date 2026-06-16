@@ -15,7 +15,7 @@ class StudentController extends Controller
     {
         $students = ApiListCache::remember('students', 'all', 120, function () {
             return Student::query()
-                ->select(['id', 'first_name', 'last_name', 'name', 'email', 'status', 'phone', 'country', 'primary_goal', 'created_at'])
+                ->select(['id', 'first_name', 'last_name', 'email', 'status', 'phone', 'country', 'primary_goal', 'created_at'])
                 ->orderByDesc('id')
                 ->get();
         });
@@ -40,7 +40,6 @@ class StudentController extends Controller
         $student = Student::create([
             'first_name' => $validated['first_name'],
             'last_name'  => $validated['last_name'],
-            'name'       => trim($validated['first_name'] . ' ' . $validated['last_name']) ?: $validated['email'],
             'email'      => $validated['email'],
             'status'     => $validated['status'] ?? 'Active',
             // ensure NOT NULL columns always get a value

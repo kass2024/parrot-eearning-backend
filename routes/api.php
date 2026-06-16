@@ -19,6 +19,7 @@ use App\Http\Controllers\Api\AdminPayoutController;
 use App\Http\Controllers\Api\AdminReportsController;
 use App\Http\Controllers\Api\SystemController;
 use App\Http\Controllers\Api\InstructorDashboardController;
+use App\Http\Controllers\Api\QuizController;
 use App\Http\Controllers\Api\LearnerDashboardController;
 use App\Http\Controllers\Api\CertificateController;
 use App\Services\ZoomService;
@@ -73,6 +74,18 @@ Route::prefix('admin')->group(function () {
     Route::post('livezoom-cohort', [LiveZoomCohortController::class, 'store']);
     Route::put('livezoom-cohort/{liveZoomCohort}', [LiveZoomCohortController::class, 'update']);
     Route::delete('livezoom-cohort/{liveZoomCohort}', [LiveZoomCohortController::class, 'destroy']);
+    Route::get('livezoom-cohort/{liveZoomCohort}/public', [LiveZoomCohortController::class, 'publicSession']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/start', [LiveZoomCohortController::class, 'startSession']);
+    Route::get('livezoom-cohort/{liveZoomCohort}/zoom', [LiveZoomCohortController::class, 'zoomDetails']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/end', [LiveZoomCohortController::class, 'endSession']);
+    Route::get('livezoom-cohort/{liveZoomCohort}/queue', [LiveZoomCohortController::class, 'adminQueue']);
+    Route::get('livezoom-cohort/{liveZoomCohort}/attendance', [LiveZoomCohortController::class, 'attendance']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/queue/release', [LiveZoomCohortController::class, 'releaseCurrent']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/join', [LiveZoomCohortController::class, 'joinQueue']);
+    Route::get('livezoom-cohort/{liveZoomCohort}/queue/status', [LiveZoomCohortController::class, 'queueStatus']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/queue/leave', [LiveZoomCohortController::class, 'leaveQueue']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/queue/joined', [LiveZoomCohortController::class, 'markJoined']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/queue/done', [LiveZoomCohortController::class, 'releaseParticipant']);
 
     /*** ---------------- DESTINATIONS ---------------- ***/
     Route::get('destinations', [ProgramManagementController::class, 'getDestinations']);
@@ -151,6 +164,17 @@ Route::prefix('admin')->group(function () {
     Route::get('instructor/students', [InstructorDashboardController::class, 'students']);
     Route::get('instructor/quizzes', [InstructorDashboardController::class, 'quizzes']);
     Route::post('instructor/quizzes', [InstructorDashboardController::class, 'storeQuiz']);
+    Route::get('instructor/quizzes/ai-status', [QuizController::class, 'aiStatus']);
+    Route::get('instructor/quizzes/topics', [QuizController::class, 'courseTopics']);
+    Route::post('instructor/quizzes/analyze-material', [QuizController::class, 'analyzeMaterial']);
+    Route::post('instructor/quizzes/generate', [QuizController::class, 'generate']);
+    Route::post('instructor/quizzes/ai', [QuizController::class, 'store']);
+    Route::get('instructor/quizzes/{quiz}', [QuizController::class, 'showForInstructor']);
+    Route::put('instructor/quizzes/{quiz}', [QuizController::class, 'update']);
+    Route::post('instructor/quizzes/{quiz}/publish', [QuizController::class, 'publish']);
+    Route::get('instructor/quizzes/{quiz}/analytics', [QuizController::class, 'analytics']);
+    Route::get('learner/quizzes/{quiz}', [QuizController::class, 'showForLearner']);
+    Route::post('learner/quizzes/{quiz}/submit', [QuizController::class, 'submit']);
     Route::post('instructor/courses', [InstructorDashboardController::class, 'createCourse']);
     Route::get('instructor/payout-requests', [InstructorDashboardController::class, 'payoutRequests']);
     Route::post('instructor/payout-requests', [InstructorDashboardController::class, 'requestPayout']);

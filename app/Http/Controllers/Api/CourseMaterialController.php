@@ -40,7 +40,7 @@ class CourseMaterialController extends Controller
         $enrollment = CourseEnrollment::query()
             ->where('student_id', $studentId)
             ->where('course_id', $course->id)
-            ->whereIn('status', ['paid', 'completed'])
+            ->whereIn('status', ['paid', 'completed', 'active', 'approved', 'enrolled'])
             ->first();
 
         if (!$enrollment) {
@@ -55,19 +55,29 @@ class CourseMaterialController extends Controller
                 'title' => $course->title,
                 'description' => $course->description,
             ],
-            'materials' => $this->buildCourseMaterialsPayload($course, true),
+            'materials' => $this->buildCourseMaterialsPayload($course, true, (int) $studentId),
         ], 200);
     }
 
     /**
      * @return array<int, array<string, mixed>>
      */
-    private function buildCourseMaterialsPayload(Course $course, bool $includeRecordings = false): array
+    private function buildCourseMaterialsPayload(Course $course, bool $includeRecordings = false, ?int $studentId = null): array
     {
         $materials = $course->materials()
             ->orderBy('sort_order')
             ->orderByDesc('id')
             ->get();
+
+        if ($studentId) {
+            $materials = $materials->filter(function (CourseMaterial $m) use ($studentId) {
+                if (!in_array($m->type, ['quiz', 'assessment'], true)) {
+                    return true;
+                }
+
+                return \App\Support\QuizMaterialHelper::isVisibleToStudent($m, $studentId);
+            });
+        }
 
         $liveMeetingIds = null;
         $recordingsByMeetingId = [];

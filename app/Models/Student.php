@@ -21,6 +21,10 @@ class Student extends Model
         'primary_goal',
     ];
 
+    protected $appends = [
+        'name',
+    ];
+
     protected $hidden = [
         'password',
     ];
@@ -28,6 +32,21 @@ class Student extends Model
     protected $casts = [
         // add casts here if you later add extra JSON/date columns
     ];
+
+    public function getNameAttribute(): string
+    {
+        $full = trim(($this->first_name ?? '') . ' ' . ($this->last_name ?? ''));
+
+        if ($full !== '') {
+            return $full;
+        }
+
+        if (isset($this->attributes['name']) && trim((string) $this->attributes['name']) !== '') {
+            return trim((string) $this->attributes['name']);
+        }
+
+        return (string) ($this->email ?? '');
+    }
 
     /**
      * Automatically hash password when setting it.
