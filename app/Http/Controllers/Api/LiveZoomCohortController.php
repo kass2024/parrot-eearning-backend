@@ -4,9 +4,13 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\LiveZoomCohort;
+use App\Models\LiveZoomCohortQueueEntry;
 use App\Models\Student;
+use App\Models\User;
 use App\Services\LiveZoomCohortQueueService;
 use App\Services\LiveZoomCohortZoomService;
+use App\Services\ZoomMeetingSdkService;
+use App\Services\ZoomService;
 use App\Support\LiveZoomCohortHelper;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
@@ -17,6 +21,8 @@ class LiveZoomCohortController extends Controller
     public function __construct(
         protected LiveZoomCohortQueueService $queueService,
         protected LiveZoomCohortZoomService $zoomService,
+        protected ZoomMeetingSdkService $meetingSdkService,
+        protected ZoomService $zoomApi,
     ) {
     }
 
@@ -100,6 +106,8 @@ class LiveZoomCohortController extends Controller
     public function startSession(LiveZoomCohort $liveZoomCohort)
     {
         try {
+            $this->assertZoomApiReady();
+
             $zoom = $this->zoomService->ensureZoomMeeting($liveZoomCohort);
             if (empty($zoom['ok'])) {
                 return response()->json(['message' => $zoom['message'] ?? 'Could not create Zoom meeting.'], 422);
@@ -170,6 +178,55 @@ class LiveZoomCohortController extends Controller
         }
     }
 
+    public function admitNextWaiting(LiveZoomCohort $liveZoomCohort)
+    {
+        try {
+            $liveZoomCohort = $this->ensureLiveSessionWithMeeting($liveZoomCohort);
+            $result = $this->queueService->admitNextIfAvailable($liveZoomCohort);
+
+            return response()->json([
+                ...$result,
+                'queue' => $this->queueService->adminQueue($liveZoomCohort->fresh()),
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+    }
+
+    public function admitAllWaiting(LiveZoomCohort $liveZoomCohort)
+    {
+        try {
+            $liveZoomCohort = $this->ensureLiveSessionWithMeeting($liveZoomCohort);
+            $result = $this->queueService->admitAllWaiting($liveZoomCohort);
+
+            return response()->json([
+                ...$result,
+                'queue' => $this->queueService->adminQueue($liveZoomCohort->fresh()),
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+    }
+
+    public function admitWaitingEntry(LiveZoomCohort $liveZoomCohort, LiveZoomCohortQueueEntry $queueEntry)
+    {
+        try {
+            if ((int) $queueEntry->livezoom_cohort_id !== (int) $liveZoomCohort->id) {
+                return response()->json(['message' => 'Queue entry does not belong to this cohort.'], 404);
+            }
+
+            $liveZoomCohort = $this->ensureLiveSessionWithMeeting($liveZoomCohort);
+            $result = $this->queueService->admitWaitingEntry($liveZoomCohort, (int) $queueEntry->id);
+
+            return response()->json([
+                ...$result,
+                'queue' => $this->queueService->adminQueue($liveZoomCohort->fresh()),
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+    }
+
     public function joinQueue(Request $request, LiveZoomCohort $liveZoomCohort)
     {
         try {
@@ -217,8 +274,224 @@ class LiveZoomCohortController extends Controller
                 'timezone' => $liveZoomCohort->timezone,
             ],
             'session' => $this->queueService->queueStatus($liveZoomCohort)['session'] ?? null,
+            'queue' => $this->queueService->publicQueueSnapshot($liveZoomCohort),
             'public_join_url' => LiveZoomCohortHelper::publicJoinUrl($liveZoomCohort),
             'guest_join_allowed' => true,
+            'embedded_meeting_enabled' => $this->meetingSdkService->isConfigured(),
+        ]);
+    }
+
+    public function publicQueue(LiveZoomCohort $liveZoomCohort)
+    {
+        try {
+            return response()->json($this->queueService->publicQueueSnapshot($liveZoomCohort));
+        } catch (\Throwable $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+    }
+
+    public function markHostInMeeting(LiveZoomCohort $liveZoomCohort)
+    {
+        try {
+            if (($liveZoomCohort->session_status ?? 'idle') !== 'live') {
+                $liveZoomCohort = $this->ensureLiveSessionWithMeeting($liveZoomCohort);
+            }
+
+            $result = $this->queueService->markHostInMeeting($liveZoomCohort);
+
+            return response()->json([
+                ...$result,
+                'queue' => $this->queueService->adminQueue($liveZoomCohort->fresh()),
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+    }
+
+    public function markHostLeft(LiveZoomCohort $liveZoomCohort)
+    {
+        $this->queueService->clearHostInMeeting($liveZoomCohort);
+
+        return response()->json(['message' => 'Host marked as left.']);
+    }
+
+    public function participantSdkAuth(Request $request, LiveZoomCohort $liveZoomCohort)
+    {
+        try {
+            $this->assertZoomProductionReady();
+
+            $participant = $this->resolveParticipant($request, false);
+            $status = $this->queueService->queueStatus(
+                $liveZoomCohort,
+                $participant['student_id'] ?? null,
+                $participant['guest_token'] ?? null,
+            );
+            $entry = $status['my_entry'] ?? null;
+
+            if (!$entry || empty($entry['can_join'])) {
+                $message = 'You are not authorized to join the meeting yet. Wait for your turn in the queue.';
+                if ($entry && !empty($entry['is_admitted']) && empty($entry['can_join'])) {
+                    $message = $this->queueService->isHostInMeeting($liveZoomCohort)
+                        ? 'The host is still connecting. Please wait a moment and try again.'
+                        : 'You are admitted. Waiting for the host to start the meeting — stay on this page.';
+                }
+
+                return response()->json(['message' => $message], 403);
+            }
+
+            if (($liveZoomCohort->session_status ?? 'idle') !== 'live') {
+                $liveZoomCohort = $this->ensureLiveSessionWithMeeting($liveZoomCohort);
+            }
+
+            [$liveZoomCohort, $meetingDetails] = $this->zoomService->resolveCohortForSdkAuth($liveZoomCohort->fresh());
+
+            $displayName = $participant['display_name'] ?: ($entry['display_name'] ?? 'Guest');
+            $avatarUrl = null;
+            if (!empty($participant['student_id'])) {
+                $student = Student::query()->find($participant['student_id']);
+                if ($student && !empty($student->avatar)) {
+                    $avatarUrl = (string) $student->avatar;
+                }
+            }
+
+            $password = $this->zoomApi->resolveMeetingPassword($liveZoomCohort, $meetingDetails);
+            $passwordCandidates = $this->zoomApi->resolveJoinPasswordCandidates($liveZoomCohort, $meetingDetails);
+
+            $payload = $this->meetingSdkService->buildJoinPayload(
+                (string) $liveZoomCohort->zoom_meeting_id,
+                $displayName,
+                0,
+                $password,
+            );
+            $payload['password_candidates'] = $passwordCandidates;
+
+            $cohortTitle = trim((string) ($liveZoomCohort->notes ?? ''));
+            if ($cohortTitle === '') {
+                $cohortTitle = 'Live Zoom Cohort #' . $liveZoomCohort->id;
+            }
+
+            return response()->json([
+                'sdk' => $payload,
+                'entry' => $entry,
+                'participant' => [
+                    'name' => $displayName,
+                    'avatar_url' => $avatarUrl,
+                ],
+                'company' => [
+                    'name' => (string) config('app.name', 'Xander Learning Hub'),
+                ],
+                'cohort_title' => $cohortTitle,
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+    }
+
+    public function hostSdkAuth(Request $request, LiveZoomCohort $liveZoomCohort)
+    {
+        try {
+            $this->assertZoomProductionReady();
+
+            if (($liveZoomCohort->session_status ?? 'idle') !== 'live') {
+                $zoom = $this->zoomService->ensureZoomMeeting($liveZoomCohort);
+                if (empty($zoom['ok'])) {
+                    return response()->json(['message' => $zoom['message'] ?? 'Could not prepare Zoom meeting.'], 422);
+                }
+                $liveZoomCohort = $liveZoomCohort->fresh();
+                $this->queueService->startSession($liveZoomCohort);
+                $liveZoomCohort = $liveZoomCohort->fresh();
+            }
+
+            if ($request->boolean('force_refresh') || $request->boolean('meeting_stale')) {
+                $liveZoomCohort = $this->zoomService->refreshMeetingForSdk($liveZoomCohort);
+                $meetingDetails = null;
+            } else {
+                [$liveZoomCohort, $meetingDetails] = $this->zoomService->resolveCohortForSdkAuth($liveZoomCohort);
+            }
+
+            if (trim((string) ($liveZoomCohort->zoom_meeting_id ?? '')) === '') {
+                return response()->json(['message' => 'Start the cohort session first to create a Zoom meeting.'], 422);
+            }
+
+            $hostContext = $this->resolveHostContext($request);
+            $hostName = $hostContext['name'];
+
+            $password = $this->zoomApi->resolveMeetingPassword(
+                $liveZoomCohort,
+                is_array($meetingDetails) ? $meetingDetails : null,
+            );
+            $passwordCandidates = $this->zoomApi->resolveJoinPasswordCandidates(
+                $liveZoomCohort,
+                is_array($meetingDetails) ? $meetingDetails : null,
+            );
+
+            // Embedded Meeting SDK: same-account host uses role=1 JWT signature (no ZAK).
+            $payload = $this->meetingSdkService->buildJoinPayload(
+                (string) $liveZoomCohort->zoom_meeting_id,
+                $hostName,
+                1,
+                $password,
+                null,
+                $hostContext['email'],
+            );
+            $payload['password_candidates'] = $passwordCandidates;
+
+            $cohortTitle = trim((string) ($liveZoomCohort->notes ?? ''));
+            if ($cohortTitle === '') {
+                $cohortTitle = 'Live Zoom Cohort #' . $liveZoomCohort->id;
+            }
+
+            return response()->json([
+                'sdk' => $payload,
+                'queue' => $this->queueService->adminQueue($liveZoomCohort),
+                'meeting_id' => $liveZoomCohort->zoom_meeting_id,
+                'meeting_refreshed' => $request->boolean('force_refresh') || $request->boolean('meeting_stale'),
+                'zoom' => $this->zoomConfigurationPayload($liveZoomCohort),
+                'host' => [
+                    'name' => $hostName,
+                    'email' => $hostContext['email'],
+                    'avatar_url' => $hostContext['avatar_url'],
+                ],
+                'company' => [
+                    'name' => $hostContext['company_name'],
+                ],
+                'cohort_title' => $cohortTitle,
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+    }
+
+    public function toggleRecording(Request $request, LiveZoomCohort $liveZoomCohort)
+    {
+        $data = $request->validate([
+            'action' => 'required|string|in:start,stop,pause,resume',
+        ]);
+
+        $meetingId = trim((string) ($liveZoomCohort->zoom_meeting_id ?? ''));
+        if ($meetingId === '') {
+            return response()->json(['message' => 'No active Zoom meeting for this cohort.'], 422);
+        }
+
+        $result = $this->zoomApi->setLiveRecordingStatus($meetingId, $data['action']);
+        if ($result === null) {
+            return response()->json(['message' => 'Zoom API is not configured.'], 422);
+        }
+        if (!empty($result['error'])) {
+            $message = data_get($result, 'body.message', 'Zoom rejected the recording request.');
+            if (stripos((string) $message, 'not recognized') !== false || (int) ($result['status'] ?? 0) === 404) {
+                $message = 'Zoom recording control failed. Ensure Cloud Recording is enabled and your S2S app has meeting:write:admin scope.';
+            }
+
+            return response()->json([
+                'message' => $message,
+                'details' => $result['body'] ?? null,
+            ], 422);
+        }
+
+        return response()->json([
+            'message' => 'Recording ' . $data['action'] . ' request sent.',
+            'result' => $result,
         ]);
     }
 
@@ -306,6 +579,14 @@ class LiveZoomCohortController extends Controller
      */
     protected function resolveParticipant(Request $request, bool $requireIdentity = true): array
     {
+        $request->merge([
+            'guest_name' => trim((string) $request->input('guest_name', '')) ?: null,
+            'guest_email' => trim((string) $request->input('guest_email', '')) ?: null,
+            'guest_phone' => trim((string) $request->input('guest_phone', '')) ?: null,
+            'guest_token' => trim((string) $request->input('guest_token', '')) ?: null,
+            'display_name' => trim((string) $request->input('display_name', '')) ?: null,
+        ]);
+
         $data = $request->validate([
             'student_id' => 'nullable|integer',
             'guest_token' => 'nullable|string|max:64',
@@ -376,6 +657,94 @@ class LiveZoomCohortController extends Controller
             'display_name' => $guestName,
             'guest_email' => $guestEmail !== '' ? $guestEmail : null,
             'guest_phone' => $guestPhone !== '' ? $guestPhone : null,
+        ];
+    }
+
+    /**
+     * Resolve host display name and branding for the in-app host studio.
+     *
+     * @return array{name: string, email: string|null, avatar_url: string|null, company_name: string}
+     */
+    protected function resolveHostContext(Request $request): array
+    {
+        $request->validate([
+            'host_email' => 'nullable|email|max:255',
+        ]);
+
+        $hostEmail = trim((string) $request->input('host_email', ''));
+        $user = $hostEmail !== ''
+            ? User::query()->where('email', $hostEmail)->first()
+            : $request->user();
+
+        $requestedName = trim((string) $request->input('host_name', ''));
+        $name = $requestedName;
+        if ($name === '' || strcasecmp($name, 'Host') === 0) {
+            $name = $user ? (string) ($user->name ?? 'Host') : ($requestedName !== '' ? $requestedName : 'Host');
+        }
+
+        $avatarUrl = null;
+        if ($user && !empty($user->avatar)) {
+            $avatarUrl = (string) $user->avatar;
+        }
+
+        return [
+            'name' => $name,
+            'email' => $user?->email,
+            'avatar_url' => $avatarUrl,
+            'company_name' => (string) config('app.name', 'Xander Learning Hub'),
+        ];
+    }
+
+    protected function ensureLiveSessionWithMeeting(LiveZoomCohort $cohort): LiveZoomCohort
+    {
+        if (($cohort->session_status ?? 'idle') === 'live') {
+            return $cohort;
+        }
+
+        $this->assertZoomApiReady();
+
+        $zoom = $this->zoomService->ensureZoomMeeting($cohort);
+        if (empty($zoom['ok'])) {
+            throw new \RuntimeException($zoom['message'] ?? 'Could not prepare Zoom meeting.');
+        }
+
+        $cohort = $cohort->fresh();
+        $this->queueService->startSession($cohort);
+
+        return $cohort->fresh();
+    }
+
+    protected function assertZoomApiReady(): void
+    {
+        $this->zoomApi->assertConfigured();
+    }
+
+    protected function assertZoomEmbedReady(): void
+    {
+        $this->meetingSdkService->assertConfigured();
+    }
+
+    protected function assertZoomProductionReady(): void
+    {
+        $this->assertZoomApiReady();
+        $this->assertZoomEmbedReady();
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    protected function zoomConfigurationPayload(LiveZoomCohort $cohort): array
+    {
+        $api = $this->zoomApi->configurationStatus();
+        $embed = $this->meetingSdkService->configurationStatus();
+
+        return [
+            'api_ready' => $api['api_ready'],
+            'embed_ready' => $embed['embed_ready'],
+            'host_user_id' => $api['host_user_id'] ?? null,
+            'embed_client_preview' => $embed['sdk_key_preview'] ?? null,
+            'meeting_id' => $cohort->zoom_meeting_id,
+            'meeting_number' => preg_replace('/\D+/', '', (string) ($cohort->zoom_meeting_id ?? '')) ?: null,
         ];
     }
 }

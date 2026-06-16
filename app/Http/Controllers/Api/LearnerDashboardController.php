@@ -519,7 +519,7 @@ class LearnerDashboardController extends Controller
 
                 ->map(fn (CourseMaterial $m) => CourseMaterialHelper::toLiveClassArray($m, $liveMeetingIds))
 
-                ->filter(fn ($item) => !empty($item['join_url']) || !empty($item['start_time']))
+                ->filter(fn ($item) => !empty($item['embed_room_path']) || !empty($item['start_time']) || ($item['type'] ?? '') === 'cohort')
 
                 ->sortByDesc(fn ($item) => match ($item['session_status'] ?? '') {
 
@@ -558,7 +558,8 @@ class LearnerDashboardController extends Controller
                     'id' => $c->id,
                     'title' => $c->notes ?: 'Weekly live cohort',
                     'course_title' => 'Live cohort schedule',
-                    'join_url' => $queueEnabled ? null : $joinUrl,
+                    'join_url' => null,
+                    'public_join_path' => '/live-cohort/' . $c->id . '/join',
                     'start_time' => Schema::hasColumn('livezoom_cohort', 'session_started_at')
                         ? $c->session_started_at?->toIso8601String()
                         : null,
@@ -657,7 +658,9 @@ class LearnerDashboardController extends Controller
 
                 'material_id' => $material->id,
 
-                'join_url' => $state['can_join'] ? $joinUrl : null,
+                'join_url' => null,
+
+                'embed_room_path' => $state['can_join'] ? CourseMaterialHelper::embedRoomPath($material, 0) : null,
 
                 'can_join' => $state['can_join'],
 

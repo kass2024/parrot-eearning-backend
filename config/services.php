@@ -36,10 +36,16 @@ return [
     ],
 
     'zoom' => [
+        // App #1 — Server-to-Server OAuth (REST: create/list/read meetings, recordings)
         'account_id' => env('ZOOM_ACCOUNT_ID'),
         'client_id' => env('ZOOM_CLIENT_ID'),
         'client_secret' => env('ZOOM_CLIENT_SECRET'),
         'host_user_id' => env('ZOOM_HOST_USER_ID', 'me'),
+        // App #2 — General app / Embed (Meeting SDK JWT signatures only; never used for REST)
+        'embed_client_id' => env('ZOOM_EMBED_CLIENT_ID', env('ZOOM_SDK_KEY', '')),
+        'embed_client_secret' => env('ZOOM_EMBED_CLIENT_SECRET', env('ZOOM_SDK_SECRET', '')),
+        'sdk_key' => env('ZOOM_EMBED_CLIENT_ID', env('ZOOM_SDK_KEY', '')),
+        'sdk_secret' => env('ZOOM_EMBED_CLIENT_SECRET', env('ZOOM_SDK_SECRET', '')),
     ],
 
     'pathways_webinar' => [

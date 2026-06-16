@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Models\LiveZoomCohort;
 use App\Models\LiveZoomCohortQueueEntry;
+use App\Support\LiveZoomCohortHelper;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
@@ -63,7 +65,60 @@ class LiveZoomCohortQueueService
             $cohort->save();
         });
 
+        $this->clearHostInMeeting($cohort);
+
         return $this->sessionPayload($cohort->fresh());
+    }
+
+    protected function hostInMeetingCacheKey(LiveZoomCohort|int $cohort): string
+    {
+        $id = $cohort instanceof LiveZoomCohort ? $cohort->id : $cohort;
+
+        return 'live_cohort_host_in_meeting_' . $id;
+    }
+
+    public function isHostInMeeting(LiveZoomCohort $cohort): bool
+    {
+        return (bool) Cache::get($this->hostInMeetingCacheKey($cohort), false);
+    }
+
+    /**
+     * Host connected in embedded SDK — cache flag used for joiner can_join gate.
+     */
+    public function resolveHostInMeeting(LiveZoomCohort $cohort): bool
+    {
+        return $this->isHostInMeeting($cohort);
+    }
+
+    public function clearHostInMeeting(LiveZoomCohort $cohort): void
+    {
+        Cache::forget($this->hostInMeetingCacheKey($cohort));
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function markHostInMeeting(LiveZoomCohort $cohort): array
+    {
+        $this->assertQueueEnabled();
+
+        Cache::put($this->hostInMeetingCacheKey($cohort), true, now()->addHours(12));
+
+        $cohort = $cohort->fresh();
+        $autoAdmitted = null;
+
+        if (($cohort->session_status ?? 'idle') === 'live' && !$this->currentParticipant($cohort)) {
+            $next = $this->admitNextWaiting($cohort);
+            if ($next) {
+                $autoAdmitted = $this->entryPayload($cohort->fresh(), $next);
+            }
+        }
+
+        return [
+            'host_in_meeting' => true,
+            'auto_admitted' => $autoAdmitted,
+            'session' => $this->sessionPayload($cohort->fresh()),
+        ];
     }
 
     /**
@@ -79,9 +134,7 @@ class LiveZoomCohortQueueService
     ): array {
         $this->assertQueueEnabled();
 
-        if (($cohort->session_status ?? 'idle') !== 'live') {
-            throw new \RuntimeException('This cohort session has not started yet. Please wait for the host.');
-        }
+        $isLive = ($cohort->session_status ?? 'idle') === 'live';
 
         $displayName = trim($displayName);
         if ($displayName === '') {
@@ -108,14 +161,24 @@ class LiveZoomCohortQueueService
 
         $existing = $this->findActiveEntry($cohort, $studentId, $guestToken);
         if ($existing) {
-            return $this->entryPayload($cohort, $existing);
+            if ($studentId === null) {
+                $existing->display_name = $displayName;
+                $existing->guest_email = $guestEmail;
+                $existing->guest_phone = $guestPhone;
+                $existing->save();
+            }
+
+            return $this->entryPayload($cohort, $existing->fresh());
         }
 
-        return DB::transaction(function () use ($cohort, $studentId, $displayName, $guestToken, $guestEmail, $guestPhone) {
-            $hasActiveParticipant = LiveZoomCohortQueueEntry::query()
+        return DB::transaction(function () use ($cohort, $studentId, $displayName, $guestToken, $guestEmail, $guestPhone, $isLive) {
+            $hasActiveParticipant = $isLive && LiveZoomCohortQueueEntry::query()
                 ->where('livezoom_cohort_id', $cohort->id)
                 ->whereIn('status', ['admitted', 'in_meeting'])
                 ->exists();
+
+            $hostInMeeting = $this->resolveHostInMeeting($cohort);
+            $shouldAutoAdmit = $isLive && !$hasActiveParticipant && $hostInMeeting;
 
             $entry = LiveZoomCohortQueueEntry::create([
                 'livezoom_cohort_id' => $cohort->id,
@@ -124,15 +187,15 @@ class LiveZoomCohortQueueService
                 'guest_email' => $studentId === null ? $guestEmail : null,
                 'guest_phone' => $studentId === null ? $guestPhone : null,
                 'display_name' => $displayName,
-                'status' => $hasActiveParticipant ? 'waiting' : 'admitted',
-                'queue_position' => $hasActiveParticipant
-                    ? $this->nextWaitingPosition($cohort)
-                    : 0,
+                'status' => $shouldAutoAdmit ? 'admitted' : 'waiting',
+                'queue_position' => $shouldAutoAdmit
+                    ? 0
+                    : $this->nextWaitingPosition($cohort),
                 'joined_at' => now(),
-                'admitted_at' => $hasActiveParticipant ? null : now(),
+                'admitted_at' => $shouldAutoAdmit ? now() : null,
             ]);
 
-            if (!$hasActiveParticipant) {
+            if ($shouldAutoAdmit) {
                 $cohort->current_queue_entry_id = $entry->id;
                 $cohort->save();
             }
@@ -232,18 +295,24 @@ class LiveZoomCohortQueueService
             throw new \RuntimeException('You are not the active participant.');
         }
 
-        $current = $this->currentParticipant($cohort);
-        if (!$current || $current->id !== $entry->id) {
-            throw new \RuntimeException('You are not the active participant.');
-        }
+        return DB::transaction(function () use ($cohort, $entry) {
+            $entry->status = 'left';
+            $entry->released_at = now();
+            $entry->save();
 
-        $result = $this->releaseCurrent($cohort);
+            $next = null;
+            if ((int) $cohort->current_queue_entry_id === (int) $entry->id) {
+                $cohort->current_queue_entry_id = null;
+                $cohort->save();
+                $next = $this->admitNextWaiting($cohort);
+            }
 
-        return $result ?? [
-            'released' => $this->entryPayload($cohort, $entry),
-            'admitted' => null,
-            'session' => $this->sessionPayload($cohort->fresh()),
-        ];
+            return [
+                'released' => $this->entryPayload($cohort, $entry),
+                'admitted' => $next ? $this->entryPayload($cohort, $next) : null,
+                'session' => $this->sessionPayload($cohort->fresh()),
+            ];
+        });
     }
 
     protected function findActiveEntry(
@@ -300,6 +369,125 @@ class LiveZoomCohortQueueService
     /**
      * @return array<string, mixed>
      */
+    public function admitWaitingEntry(LiveZoomCohort $cohort, int $entryId): array
+    {
+        $this->assertQueueEnabled();
+
+        return DB::transaction(function () use ($cohort, $entryId) {
+            $current = $this->currentParticipant($cohort);
+            if ($current) {
+                throw new \RuntimeException('Release the current participant before admitting someone else.');
+            }
+
+            $entry = LiveZoomCohortQueueEntry::query()
+                ->where('livezoom_cohort_id', $cohort->id)
+                ->where('id', $entryId)
+                ->where('status', 'waiting')
+                ->lockForUpdate()
+                ->first();
+
+            if (!$entry) {
+                throw new \RuntimeException('That participant is no longer waiting in the queue.');
+            }
+
+            $entry->status = 'admitted';
+            $entry->queue_position = 0;
+            $entry->admitted_at = now();
+            $entry->save();
+
+            $cohort->current_queue_entry_id = $entry->id;
+            $cohort->save();
+
+            $this->recalculateWaitingPositions($cohort);
+
+            return [
+                'message' => $entry->display_name . ' has been admitted.',
+                'admitted' => $this->entryPayload($cohort, $entry->fresh()),
+                'session' => $this->sessionPayload($cohort->fresh()),
+            ];
+        });
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function admitAllWaiting(LiveZoomCohort $cohort): array
+    {
+        $this->assertQueueEnabled();
+
+        return DB::transaction(function () use ($cohort) {
+            $current = $this->currentParticipant($cohort);
+            if ($current) {
+                throw new \RuntimeException('Release the current participant before admitting more people.');
+            }
+
+            $waiting = LiveZoomCohortQueueEntry::query()
+                ->where('livezoom_cohort_id', $cohort->id)
+                ->where('status', 'waiting')
+                ->orderBy('joined_at')
+                ->lockForUpdate()
+                ->get();
+
+            if ($waiting->isEmpty()) {
+                return [
+                    'message' => 'No one is waiting in the queue.',
+                    'admitted' => [],
+                    'count' => 0,
+                    'session' => $this->sessionPayload($cohort),
+                ];
+            }
+
+            $admitted = [];
+            $first = $waiting->first();
+
+            foreach ($waiting as $entry) {
+                $entry->status = 'admitted';
+                $entry->queue_position = 0;
+                $entry->admitted_at = now();
+                $entry->save();
+                $admitted[] = $this->entryPayload($cohort, $entry->fresh());
+            }
+
+            $cohort->current_queue_entry_id = $first->id;
+            $cohort->save();
+            $this->recalculateWaitingPositions($cohort);
+
+            return [
+                'message' => count($admitted) . ' participant(s) admitted. They can join the meeting now.',
+                'admitted' => $admitted,
+                'count' => count($admitted),
+                'session' => $this->sessionPayload($cohort->fresh()),
+            ];
+        });
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function admitNextIfAvailable(LiveZoomCohort $cohort): array
+    {
+        $this->assertQueueEnabled();
+
+        if ($this->currentParticipant($cohort)) {
+            throw new \RuntimeException('Someone is already in the session. Release them first or use “Release → admit next”.');
+        }
+
+        return DB::transaction(function () use ($cohort) {
+            $next = $this->admitNextWaiting($cohort);
+
+            return [
+                'message' => $next
+                    ? $next->display_name . ' has been admitted.'
+                    : 'No one is waiting in the queue.',
+                'admitted' => $next ? $this->entryPayload($cohort, $next) : null,
+                'session' => $this->sessionPayload($cohort->fresh()),
+            ];
+        });
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
     public function adminQueue(LiveZoomCohort $cohort): array
     {
         $this->assertQueueEnabled();
@@ -312,12 +500,21 @@ class LiveZoomCohortQueueService
             ->map(fn (LiveZoomCohortQueueEntry $entry) => $this->entryPayload($cohort, $entry));
 
         $current = $this->currentParticipant($cohort);
+        $admittedWaiting = LiveZoomCohortQueueEntry::query()
+            ->where('livezoom_cohort_id', $cohort->id)
+            ->where('status', 'admitted')
+            ->when($current, fn ($q) => $q->where('id', '!=', $current->id))
+            ->orderBy('admitted_at')
+            ->get()
+            ->map(fn (LiveZoomCohortQueueEntry $entry) => $this->entryPayload($cohort, $entry));
 
         return [
             'session' => $this->sessionPayload($cohort),
             'current' => $current ? $this->entryPayload($cohort, $current) : null,
             'waiting' => $waiting,
             'waiting_count' => $waiting->count(),
+            'admitted_ready' => $admittedWaiting->values()->all(),
+            'admitted_ready_count' => $admittedWaiting->count(),
         ];
     }
 
@@ -392,6 +589,37 @@ class LiveZoomCohortQueueService
     /**
      * @return array<string, mixed>
      */
+    public function publicQueueSnapshot(LiveZoomCohort $cohort): array
+    {
+        $this->assertQueueEnabled();
+
+        $waiting = LiveZoomCohortQueueEntry::query()
+            ->where('livezoom_cohort_id', $cohort->id)
+            ->where('status', 'waiting')
+            ->orderBy('joined_at')
+            ->get()
+            ->map(fn (LiveZoomCohortQueueEntry $entry) => [
+                'id' => $entry->id,
+                'display_name' => $entry->display_name,
+                'queue_position' => (int) $entry->queue_position,
+                'joined_at' => $entry->joined_at?->toIso8601String(),
+            ]);
+
+        $current = $this->currentParticipant($cohort);
+
+        return [
+            'session_status' => $cohort->session_status ?? 'idle',
+            'is_live' => ($cohort->session_status ?? 'idle') === 'live',
+            'waiting_count' => $waiting->count(),
+            'waiting' => $waiting->values()->all(),
+            'current_participant' => $current?->display_name,
+            'has_active_participant' => $current !== null,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
     public function attendanceList(LiveZoomCohort $cohort): array
     {
         $this->assertQueueEnabled();
@@ -449,8 +677,11 @@ class LiveZoomCohortQueueService
     protected function entryPayload(LiveZoomCohort $cohort, LiveZoomCohortQueueEntry $entry): array
     {
         $ahead = max(0, (int) $entry->queue_position - 1);
+        $sessionLive = ($cohort->session_status ?? 'idle') === 'live';
+        $hostInMeeting = $this->resolveHostInMeeting($cohort);
         $canJoin = in_array($entry->status, ['admitted', 'in_meeting'], true)
-            && ($cohort->session_status ?? 'idle') === 'live';
+            && $sessionLive
+            && $hostInMeeting;
 
         return [
             'id' => $entry->id,
@@ -466,20 +697,31 @@ class LiveZoomCohortQueueService
             'is_waiting' => $entry->status === 'waiting',
             'is_admitted' => in_array($entry->status, ['admitted', 'in_meeting'], true),
             'can_join' => $canJoin,
-            'join_url' => $canJoin ? ($cohort->zoom_link ?? null) : null,
+            'in_app_room_path' => $canJoin ? LiveZoomCohortHelper::participantRoomPath($cohort) : null,
             'joined_at' => $entry->joined_at?->toIso8601String(),
             'admitted_at' => $entry->admitted_at?->toIso8601String(),
-            'message' => $this->statusMessage($entry),
+            'message' => $this->statusMessage($entry, $cohort),
         ];
     }
 
-    protected function statusMessage(LiveZoomCohortQueueEntry $entry): string
+    protected function statusMessage(LiveZoomCohortQueueEntry $entry, ?LiveZoomCohort $cohort = null): string
     {
+        $sessionLive = $cohort ? (($cohort->session_status ?? 'idle') === 'live') : true;
+        $hostInMeeting = $cohort ? $this->resolveHostInMeeting($cohort) : true;
+
         return match ($entry->status) {
-            'waiting' => $entry->queue_position <= 1
-                ? 'You are next in line. Please stay on this page.'
-                : 'You are #' . $entry->queue_position . ' in the queue. Waiting for the previous participant to finish.',
-            'admitted' => 'It is your turn. Click Join Zoom to enter the session.',
+            'waiting' => !$sessionLive
+                ? 'You are in the waiting room. The host will admit you when ready — even before the scheduled start time.'
+                : ($entry->queue_position <= 1
+                    ? ($hostInMeeting
+                        ? 'You are next in line. The host will admit you shortly.'
+                        : 'You are next in line. Waiting for the host to start the meeting.')
+                    : 'You are #' . $entry->queue_position . ' in the queue. Waiting for the previous participant to finish.'),
+            'admitted' => !$sessionLive
+                ? 'The host admitted you. The session will open shortly — stay on this page.'
+                : (!$hostInMeeting
+                    ? 'You are admitted. Waiting for the host to connect — stay on this page.'
+                    : 'It is your turn. Open the in-app meeting to enter the session.'),
             'in_meeting' => 'You are in the session.',
             default => 'Queue status updated.',
         };
@@ -506,6 +748,7 @@ class LiveZoomCohortQueueService
             'waiting_count' => $waitingCount,
             'has_active_participant' => $current !== null,
             'current_participant' => $current?->display_name,
+            'host_in_meeting' => $this->isHostInMeeting($cohort),
             'queue_enabled' => true,
         ];
     }

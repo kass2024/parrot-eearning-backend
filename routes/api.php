@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\CourseController;
 use App\Http\Controllers\Api\CourseMaterialController;
 use App\Http\Controllers\Api\ZoomController;
+use App\Http\Controllers\Api\ZoomEmbedController;
 use App\Http\Controllers\Api\StudentDashboardController;
 use App\Http\Controllers\Api\LearnerExtrasController;
 use App\Http\Controllers\Api\MeetingRegistrationController;
@@ -52,6 +53,7 @@ Route::prefix('admin')->group(function () {
     // Meeting Registration
     Route::get('meeting-registrations/webinar/status', [MeetingRegistrationController::class, 'webinarStatus']);
     Route::post('meeting-registrations/webinar/start', [MeetingRegistrationController::class, 'startWebinar']);
+    Route::post('meeting-registrations/webinar/sdk-auth', [ZoomEmbedController::class, 'webinarHostAuth']);
     Route::post('meeting-registrations/webinar/recording', [MeetingRegistrationController::class, 'setWebinarRecording']);
     Route::get('meeting-registrations/webinar/recordings', [MeetingRegistrationController::class, 'webinarRecordings']);
     Route::post('meeting-registrations', [MeetingRegistrationController::class, 'store']);
@@ -75,17 +77,26 @@ Route::prefix('admin')->group(function () {
     Route::put('livezoom-cohort/{liveZoomCohort}', [LiveZoomCohortController::class, 'update']);
     Route::delete('livezoom-cohort/{liveZoomCohort}', [LiveZoomCohortController::class, 'destroy']);
     Route::get('livezoom-cohort/{liveZoomCohort}/public', [LiveZoomCohortController::class, 'publicSession']);
+    Route::get('livezoom-cohort/{liveZoomCohort}/queue/public', [LiveZoomCohortController::class, 'publicQueue']);
     Route::post('livezoom-cohort/{liveZoomCohort}/start', [LiveZoomCohortController::class, 'startSession']);
     Route::get('livezoom-cohort/{liveZoomCohort}/zoom', [LiveZoomCohortController::class, 'zoomDetails']);
     Route::post('livezoom-cohort/{liveZoomCohort}/end', [LiveZoomCohortController::class, 'endSession']);
     Route::get('livezoom-cohort/{liveZoomCohort}/queue', [LiveZoomCohortController::class, 'adminQueue']);
     Route::get('livezoom-cohort/{liveZoomCohort}/attendance', [LiveZoomCohortController::class, 'attendance']);
     Route::post('livezoom-cohort/{liveZoomCohort}/queue/release', [LiveZoomCohortController::class, 'releaseCurrent']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/queue/admit-next', [LiveZoomCohortController::class, 'admitNextWaiting']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/queue/admit-all', [LiveZoomCohortController::class, 'admitAllWaiting']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/queue/admit/{queueEntry}', [LiveZoomCohortController::class, 'admitWaitingEntry']);
     Route::post('livezoom-cohort/{liveZoomCohort}/join', [LiveZoomCohortController::class, 'joinQueue']);
     Route::get('livezoom-cohort/{liveZoomCohort}/queue/status', [LiveZoomCohortController::class, 'queueStatus']);
     Route::post('livezoom-cohort/{liveZoomCohort}/queue/leave', [LiveZoomCohortController::class, 'leaveQueue']);
     Route::post('livezoom-cohort/{liveZoomCohort}/queue/joined', [LiveZoomCohortController::class, 'markJoined']);
     Route::post('livezoom-cohort/{liveZoomCohort}/queue/done', [LiveZoomCohortController::class, 'releaseParticipant']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/queue/sdk-auth', [LiveZoomCohortController::class, 'participantSdkAuth']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/host/sdk-auth', [LiveZoomCohortController::class, 'hostSdkAuth']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/host/mark-in-meeting', [LiveZoomCohortController::class, 'markHostInMeeting']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/host/mark-left', [LiveZoomCohortController::class, 'markHostLeft']);
+    Route::post('livezoom-cohort/{liveZoomCohort}/recording', [LiveZoomCohortController::class, 'toggleRecording']);
 
     /*** ---------------- DESTINATIONS ---------------- ***/
     Route::get('destinations', [ProgramManagementController::class, 'getDestinations']);
@@ -146,6 +157,7 @@ Route::prefix('admin')->group(function () {
     Route::get('learner/dashboard', [LearnerDashboardController::class, 'dashboard']);
     Route::get('learner/notifications', [LearnerDashboardController::class, 'notifications']);
     Route::get('learner/recordings', [LearnerDashboardController::class, 'recordings']);
+    Route::post('learner/live-classes/{material}/sdk-auth', [ZoomEmbedController::class, 'learnerMaterialAuth']);
     Route::get('learner/courses/{course}/materials', [CourseMaterialController::class, 'learnerIndex']);
 
     Route::get('certificates/verify/{courseId}/{studentId}', [CertificateController::class, 'verify'])
@@ -161,6 +173,7 @@ Route::prefix('admin')->group(function () {
     Route::get('instructor/dashboard', [InstructorDashboardController::class, 'dashboard']);
     Route::get('instructor/live-classes', [InstructorDashboardController::class, 'liveClasses']);
     Route::post('instructor/live-classes/{material}/start', [InstructorDashboardController::class, 'startLiveSession']);
+    Route::post('instructor/live-classes/{material}/sdk-auth', [ZoomEmbedController::class, 'instructorMaterialAuth']);
     Route::get('instructor/students', [InstructorDashboardController::class, 'students']);
     Route::get('instructor/quizzes', [InstructorDashboardController::class, 'quizzes']);
     Route::post('instructor/quizzes', [InstructorDashboardController::class, 'storeQuiz']);
@@ -249,6 +262,8 @@ Route::prefix('admin')->group(function () {
 
     /*** ---------------- ZOOM ---------------- ***/
     Route::get('zoom/meetings', [ZoomController::class, 'listMeetings']);
+    Route::get('zoom/embed/config', [ZoomEmbedController::class, 'config']);
+    Route::post('zoom/embed/auth', [ZoomEmbedController::class, 'auth']);
     Route::post('zoom/meetings', [ZoomController::class, 'createMeeting']);
     Route::post('zoom/meetings/{id}/recording', [ZoomController::class, 'setMeetingRecording']);
     Route::delete('zoom/meetings/{id}', [ZoomController::class, 'deleteMeeting']);

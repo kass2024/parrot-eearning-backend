@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\LiveZoomCohort;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 
@@ -41,6 +42,11 @@ class ZoomService
 
             return $response['access_token'];
         });
+    }
+
+    public function clearAccessTokenCache(): void
+    {
+        Cache::forget('zoom_access_token_v2');
     }
 
     protected function client()
@@ -385,6 +391,45 @@ class ZoomService
         return (string) config('services.zoom.host_user_id', 'me');
     }
 
+    /**
+     * Resolve the Zoom user id used for meeting creation and ZAK requests.
+     * Avoids "me" because it breaks ZAK + embedded host start in some SDK builds.
+     */
+    public function resolveHostUserId(): string
+    {
+        $configured = trim($this->hostUserId());
+        if ($configured !== '' && $configured !== 'me' && !str_contains($configured, '@')) {
+            return $configured;
+        }
+
+        return Cache::remember('zoom_resolved_host_user_id_v1', 3600, function () use ($configured) {
+            $client = $this->client();
+            if (!$client) {
+                return $configured !== '' ? $configured : 'me';
+            }
+
+            if ($configured !== '' && str_contains($configured, '@')) {
+                $response = $client->get('/users/' . rawurlencode($configured));
+                if ($response->successful()) {
+                    $id = $response->json('id');
+                    if (is_string($id) && $id !== '') {
+                        return $id;
+                    }
+                }
+            }
+
+            $response = $client->get('/users/me');
+            if ($response->successful()) {
+                $id = $response->json('id');
+                if (is_string($id) && $id !== '') {
+                    return $id;
+                }
+            }
+
+            return $configured !== '' ? $configured : 'me';
+        });
+    }
+
     public function isConfigured(): bool
     {
         return $this->accountId !== '' && $this->clientId !== '' && $this->clientSecret !== '';
@@ -404,6 +449,62 @@ class ZoomService
     public function recordingAccessToken(): ?string
     {
         return $this->getAccessToken();
+    }
+
+    /**
+     * Fetch a host ZAK token for Meeting SDK (embedded host join).
+     *
+     * @return array{ok: bool, token?: string, message?: string, scope_hint?: string, status?: int}
+     */
+    public function fetchHostZakToken(?string $userId = null): array
+    {
+        $client = $this->client();
+        if (!$client) {
+            return [
+                'ok' => false,
+                'message' => 'Zoom OAuth token unavailable. Check ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, and ZOOM_CLIENT_SECRET.',
+            ];
+        }
+
+        $candidates = array_values(array_unique(array_filter([
+            $userId,
+            $this->resolveHostUserId(),
+        ])));
+
+        $lastError = null;
+
+        foreach ($candidates as $host) {
+            $response = $client->get('/users/' . rawurlencode((string) $host) . '/token', [
+                'type' => 'zak',
+            ]);
+
+            if ($response->successful()) {
+                $token = $response->json('token');
+                if (is_string($token) && $token !== '') {
+                    return ['ok' => true, 'token' => $token];
+                }
+
+                $lastError = [
+                    'ok' => false,
+                    'message' => 'Zoom returned an empty host token (ZAK).',
+                ];
+                continue;
+            }
+
+            $body = $response->json();
+            $lastError = [
+                'ok' => false,
+                'status' => $response->status(),
+                'message' => is_array($body) ? ($body['message'] ?? 'ZAK request failed.') : 'ZAK request failed.',
+                'scope_hint' => 'Add user:read:token:admin (or user:read:token) to your Server-to-Server OAuth app, re-activate it, then retry. Set ZOOM_HOST_USER_ID to your Zoom host email if needed.',
+            ];
+        }
+
+        return $lastError ?? [
+            'ok' => false,
+            'message' => 'Could not obtain a Zoom host token (ZAK).',
+            'scope_hint' => 'Add user:read:token:admin to your Server-to-Server OAuth app and re-activate it.',
+        ];
     }
 
     /**
@@ -604,6 +705,52 @@ class ZoomService
     }
 
     /**
+     * Create a persistent cohort meeting (type 3 — recurring, no fixed time).
+     * Unlike instant meetings (type 1), the meeting ID stays valid across sessions.
+     * Note: type 8 requires recurrence settings; type 3 does not.
+     */
+    public function createPersistentCohortMeeting(array $data, ?string $userId = null): ?array
+    {
+        $client = $this->client();
+        if (!$client) {
+            return null;
+        }
+
+        $host = $userId ?: $this->resolveHostUserId();
+
+        $payload = [
+            'topic' => $data['topic'] ?? 'Live session',
+            'type' => 3,
+            'duration' => max(15, min(240, (int) ($data['duration'] ?? 60))),
+            'agenda' => $data['agenda'] ?? '',
+            'timezone' => $data['timezone'] ?? 'UTC',
+            'settings' => [
+                'join_before_host' => (bool) ($data['join_before_host'] ?? true),
+                'waiting_room' => (bool) ($data['waiting_room'] ?? false),
+                'mute_upon_entry' => $data['mute_upon_entry'] ?? false,
+                'auto_recording' => ($data['auto_recording'] ?? false) ? 'cloud' : 'none',
+                'host_video' => $data['host_video'] ?? true,
+                'participant_video' => $data['participant_video'] ?? true,
+                'audio' => $data['audio'] ?? 'both',
+                'meeting_authentication' => false,
+                'approval_type' => 2,
+            ],
+        ];
+
+        $response = $client->post('/users/' . rawurlencode($host) . '/meetings', $payload);
+
+        if ($response->failed()) {
+            return [
+                'error' => true,
+                'status' => $response->status(),
+                'body' => $response->json(),
+            ];
+        }
+
+        return $response->json();
+    }
+
+    /**
      * Create a Zoom instant meeting (type 1) for live webinar start.
      */
     public function createInstantMeeting(array $data, ?string $userId = null): ?array
@@ -613,7 +760,7 @@ class ZoomService
             return null;
         }
 
-        $host = $userId ?: $this->hostUserId();
+        $host = $userId ?: $this->resolveHostUserId();
 
         $payload = [
             'topic' => $data['topic'] ?? 'Live session',
@@ -759,15 +906,16 @@ class ZoomService
      */
     public function fetchLiveMeetingIds(string $userId = 'me'): array
     {
-        $cacheKey = 'zoom_live_meeting_ids_' . $userId;
+        $hostId = $userId === 'me' ? $this->resolveHostUserId() : $userId;
+        $cacheKey = 'zoom_live_meeting_ids_' . $hostId;
 
-        return Cache::remember($cacheKey, 20, function () use ($userId) {
+        return Cache::remember($cacheKey, 20, function () use ($hostId) {
             $client = $this->client();
             if (!$client) {
                 return [];
             }
 
-            $response = $client->get("/users/{$userId}/meetings", [
+            $response = $client->get('/users/' . rawurlencode($hostId) . '/meetings', [
                 'type' => 'live',
                 'page_size' => 100,
             ]);
@@ -794,7 +942,58 @@ class ZoomService
             return false;
         }
 
-        return in_array($meetingId, $this->fetchLiveMeetingIds($userId), true);
+        $hostId = $userId === 'me' ? $this->resolveHostUserId() : $userId;
+
+        return in_array($meetingId, $this->fetchLiveMeetingIds($hostId), true);
+    }
+
+    /**
+     * @param  array<string, mixed>  $details
+     */
+    public function isMeetingJoinableForEmbed(array $details): bool
+    {
+        if (!empty($details['error'])) {
+            return false;
+        }
+
+        $type = (int) ($details['type'] ?? 0);
+        // Instant meetings expire once ended — not safe for embedded rejoin.
+        if ($type === 1) {
+            return false;
+        }
+
+        return trim((string) ($details['id'] ?? '')) !== '';
+    }
+
+    /**
+     * @return array{api_ready: bool, host_user_id: string|null, message: string|null}
+     */
+    public function configurationStatus(): array
+    {
+        if (!$this->isConfigured()) {
+            return [
+                'api_ready' => false,
+                'host_user_id' => null,
+                'message' => 'Set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, and ZOOM_CLIENT_SECRET (Server-to-Server OAuth app).',
+            ];
+        }
+
+        $readStatus = $this->meetingReadScopeStatus();
+
+        return [
+            'api_ready' => true,
+            'host_user_id' => $this->resolveHostUserId(),
+            'message' => null,
+            'meeting_read_ok' => $readStatus['read_ok'],
+        ];
+    }
+
+    public function assertConfigured(): void
+    {
+        $status = $this->configurationStatus();
+        if (!$status['api_ready']) {
+            throw new \RuntimeException($status['message'] ?? 'Zoom API is not configured.');
+        }
     }
 
     public function listWebinars(string $userId = 'me'): ?array
@@ -846,6 +1045,103 @@ class ZoomService
         return null;
     }
 
+    public function extractPasswordFromJoinUrl(?string $url): ?string
+    {
+        if (!$url) {
+            return null;
+        }
+
+        $query = parse_url($url, PHP_URL_QUERY);
+        if (!is_string($query) || $query === '') {
+            return null;
+        }
+
+        parse_str($query, $params);
+
+        $password = $params['pwd'] ?? $params['password'] ?? null;
+
+        return is_string($password) && $password !== '' ? $password : null;
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $details
+     */
+    public function isMeetingApiScopeError(?array $details): bool
+    {
+        if (!is_array($details) || empty($details['error'])) {
+            return false;
+        }
+
+        $message = json_encode($details['body'] ?? $details, JSON_UNESCAPED_UNICODE);
+
+        return is_string($message) && str_contains($message, 'does not contain scopes');
+    }
+
+    /**
+     * @return array{read_ok: bool, message: string|null}
+     */
+    public function meetingReadScopeStatus(): array
+    {
+        if (!$this->isConfigured()) {
+            return ['read_ok' => false, 'message' => 'Zoom API is not configured.'];
+        }
+
+        $probeId = '12345678901';
+        $details = $this->getMeeting($probeId);
+
+        if ($this->isMeetingApiScopeError($details)) {
+            return [
+                'read_ok' => false,
+                'message' => null,
+            ];
+        }
+
+        return ['read_ok' => true, 'message' => null];
+    }
+
+    /**
+     * Resolve passcode for Meeting SDK join (DB column, API, or join URL).
+     */
+    public function resolveMeetingPassword(LiveZoomCohort $cohort, ?array $meetingDetails = null): string
+    {
+        $candidates = $this->resolveJoinPasswordCandidates($cohort, $meetingDetails);
+
+        return $candidates[0] ?? '';
+    }
+
+    /**
+     * Password variants to try with the Meeting SDK (passcode, URL token, empty).
+     *
+     * @return list<string>
+     */
+    public function resolveJoinPasswordCandidates(LiveZoomCohort $cohort, ?array $meetingDetails = null): array
+    {
+        $candidates = [];
+
+        $stored = trim((string) ($cohort->zoom_password ?? ''));
+        if ($stored !== '') {
+            $candidates[] = $stored;
+        }
+
+        if (is_array($meetingDetails)) {
+            foreach (['password', 'passcode', 'h323_password'] as $key) {
+                $value = $meetingDetails[$key] ?? null;
+                if (is_string($value) && $value !== '') {
+                    $candidates[] = $value;
+                }
+            }
+        }
+
+        $fromUrl = $this->extractPasswordFromJoinUrl($cohort->zoom_link ?? null);
+        if ($fromUrl) {
+            $candidates[] = $fromUrl;
+        }
+
+        $candidates[] = '';
+
+        return array_values(array_unique($candidates, SORT_STRING));
+    }
+
     public function pathwaysMeetingId(): ?string
     {
         $fromEnv = trim((string) config('services.pathways_webinar.zoom_meeting_id', ''));
@@ -858,7 +1154,7 @@ class ZoomService
         return $this->extractMeetingIdFromJoinUrl($joinUrl);
     }
 
-    public function getMeeting(string $meetingId): ?array
+    public function getMeeting(string $meetingId, bool $allowTokenRefresh = true): ?array
     {
         $client = $this->client();
         if (!$client) {
@@ -867,11 +1163,19 @@ class ZoomService
 
         $response = $client->get('/meetings/' . rawurlencode($meetingId));
         if ($response->failed()) {
-            return [
+            $result = [
                 'error' => true,
                 'status' => $response->status(),
                 'body' => $response->json(),
             ];
+
+            if ($allowTokenRefresh && $this->isMeetingApiScopeError($result)) {
+                $this->clearAccessTokenCache();
+
+                return $this->getMeeting($meetingId, false);
+            }
+
+            return $result;
         }
 
         return $response->json();
@@ -899,6 +1203,87 @@ class ZoomService
                 'auto_recording' => $enabled ? 'cloud' : 'none',
             ],
         ]);
+
+        if ($response->failed()) {
+            return [
+                'error' => true,
+                'status' => $response->status(),
+                'body' => $response->json(),
+            ];
+        }
+
+        return $response->json();
+    }
+
+    /**
+     * @param  array<string, mixed>  $settings
+     */
+    public function updateMeetingSettings(string $meetingId, array $settings): ?array
+    {
+        if ($this->isLegacyPathwaysPmiId($meetingId)) {
+            return null;
+        }
+
+        $client = $this->client();
+        if (!$client) {
+            return null;
+        }
+
+        $response = $client->patch('/meetings/' . rawurlencode($meetingId), [
+            'settings' => $settings,
+        ]);
+
+        if ($response->failed()) {
+            return [
+                'error' => true,
+                'status' => $response->status(),
+                'body' => $response->json(),
+            ];
+        }
+
+        return $response->json();
+    }
+
+    /**
+     * Start, stop, pause, or resume cloud recording during a live meeting.
+     * Uses Zoom Server-to-Server OAuth: PATCH /live_meetings/{meetingId}/events
+     *
+     * @param  'start'|'stop'|'pause'|'resume'  $action
+     */
+    public function setLiveRecordingStatus(string $meetingId, string $action): ?array
+    {
+        $client = $this->client();
+        if (!$client) {
+            return null;
+        }
+
+        $methodMap = [
+            'start' => 'recording.start',
+            'stop' => 'recording.stop',
+            'pause' => 'recording.pause',
+            'resume' => 'recording.resume',
+        ];
+
+        $method = $methodMap[$action] ?? null;
+        if ($method === null) {
+            return [
+                'error' => true,
+                'status' => 422,
+                'body' => ['message' => 'Invalid recording action.'],
+            ];
+        }
+
+        $response = $client->patch('/live_meetings/' . rawurlencode($meetingId) . '/events', [
+            'method' => $method,
+        ]);
+
+        if ($response->status() === 202 || $response->successful()) {
+            return [
+                'ok' => true,
+                'status' => $response->status(),
+                'body' => $response->json() ?: ['message' => 'Recording command accepted by Zoom.'],
+            ];
+        }
 
         if ($response->failed()) {
             return [

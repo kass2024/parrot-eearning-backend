@@ -1,0 +1,8 @@
+<IfModule mod_rewrite.c>
+    Options +FollowSymLinks
+    RewriteEngine On
+
+    # Route API and app requests through Laravel front controller (cPanel doc root = project root)
+    RewriteCond %{REQUEST_URI} !^/public/
+    RewriteRule ^(.*)$ public/index.php/$1 [L,QSA]
+</IfModule>

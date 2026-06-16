@@ -290,6 +290,7 @@ class CourseController extends Controller
         $zoomJoinLink = $data['zoom_link'] ?? null;
         $zoomStartUrl = null;
         $zoomMeetingId = null;
+        $zoomPassword = null;
 
         if (!$zoomJoinLink) {
             $hostId = (string) config('services.zoom.host_user_id', 'me');
@@ -328,6 +329,7 @@ class CourseController extends Controller
             $zoomJoinLink = $zoomData['join_url'] ?? null;
             $zoomStartUrl = $zoomData['start_url'] ?? null;
             $zoomMeetingId = $zoomData['id'] ?? null;
+            $zoomPassword = $zoomData['password'] ?? null;
 
             if (!$zoomJoinLink) {
                 return response()->json([
@@ -375,6 +377,7 @@ class CourseController extends Controller
                     'join_url' => $zoomJoinLink,
                     'start_url' => $zoomStartUrl,
                     'meeting_id' => $zoomMeetingId,
+                    'password' => $zoomPassword,
                     'duration' => $data['duration'] ?? 60,
                     'timezone' => $data['timezone'] ?? config('app.timezone', 'UTC'),
                 ],

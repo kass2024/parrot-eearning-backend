@@ -128,6 +128,26 @@ class CourseMaterialHelper
 
 
 
+    public static function meetingPassword(CourseMaterial $material): ?string
+    {
+        $meta = is_array($material->metadata) ? $material->metadata : [];
+
+        if (!empty($meta['password']) && is_string($meta['password'])) {
+            return (string) $meta['password'];
+        }
+
+        return null;
+    }
+
+    public static function embedRoomPath(CourseMaterial $material, int $role = 0): ?string
+    {
+        if (!self::meetingId($material)) {
+            return null;
+        }
+
+        return '/meeting/room?material_id=' . $material->id . '&role=' . $role;
+    }
+
     public static function scheduledAt(CourseMaterial $material): ?Carbon
 
     {
@@ -363,7 +383,13 @@ class CourseMaterialHelper
 
             'course_title' => $material->course?->title,
 
-            'join_url' => $joinUrl,
+            'meeting_id' => self::meetingId($material),
+
+            'join_url' => null,
+
+            'embed_room_path' => self::embedRoomPath($material, 0),
+
+            'host_room_path' => self::embedRoomPath($material, 1),
 
             'start_time' => $scheduled?->toIso8601String(),
 
@@ -429,7 +455,13 @@ class CourseMaterialHelper
 
             'resource_url' => $kind === 'zoom' ? null : $material->resource_url,
 
-            'join_url' => $kind === 'zoom' ? self::learnerJoinUrl($material) : null,
+            'join_url' => null,
+
+            'meeting_id' => $kind === 'zoom' ? self::meetingId($material) : null,
+
+            'embed_room_path' => $kind === 'zoom' ? self::embedRoomPath($material, 0) : null,
+
+            'host_room_path' => $kind === 'zoom' ? self::embedRoomPath($material, 1) : null,
 
             'scheduled_at' => $scheduled?->toIso8601String(),
 

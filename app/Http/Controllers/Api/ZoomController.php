@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Services\MailDeliveryService;
 use App\Services\ZoomService;
 use App\Support\AdminRecordingCatalog;
+use App\Support\FrontendUrl;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
@@ -130,7 +131,8 @@ class ZoomController extends Controller
     {
         $allowed = array_values(array_unique(array_filter([
             rtrim((string) config('app.frontend_url'), '/'),
-            'https://elearning.xanderglobalscholars.com',
+            FrontendUrl::base(),
+            'https://xanderglobalacademy.com',
             'http://localhost:8080',
             'http://127.0.0.1:8080',
         ])));
