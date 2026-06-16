@@ -114,6 +114,7 @@ class PCloudService
                 'ok' => ($uploadTest['ok'] ?? false),
                 'api_host' => $host,
                 'root_folder_id' => $this->rootFolderId,
+                'token_length' => strlen((string) $this->accessToken),
                 'email' => is_array($info) ? ($info['email'] ?? null) : null,
                 'upload_test' => $uploadTest,
             ];
@@ -141,49 +142,30 @@ class PCloudService
         }
 
         file_put_contents($tmp, 'pcloud upload health check');
+        $params = ['folderid' => $this->rootFolderId, 'nopartial' => 1];
+        $errors = [];
 
         try {
-            $response = $this->uploadViaPut(
-                ['folderid' => $this->rootFolderId, 'nopartial' => 1],
-                $tmp,
-                'pcloud-health-check.txt'
-            );
-
-            $meta = $response['metadata'][0] ?? $response['metadata'] ?? null;
-            $fileId = is_array($meta) ? (int) ($meta['fileid'] ?? 0) : 0;
-            if ($fileId > 0) {
+            foreach (['uploadViaCurl' => 'cURL', 'uploadViaPut' => 'PUT', 'uploadViaMultipartPost' => 'POST'] as $method => $label) {
                 try {
-                    $this->deleteFile($fileId);
-                } catch (\Throwable) {
-                    // ignore cleanup failure
-                }
-            }
-
-            return ['ok' => true, 'method' => 'PUT'];
-        } catch (\Throwable $putError) {
-            try {
-                $response = $this->uploadViaMultipartPost(
-                    ['folderid' => $this->rootFolderId, 'nopartial' => 1],
-                    $tmp,
-                    'pcloud-health-check.txt'
-                );
-                $meta = $response['metadata'][0] ?? $response['metadata'] ?? null;
-                $fileId = is_array($meta) ? (int) ($meta['fileid'] ?? 0) : 0;
-                if ($fileId > 0) {
-                    try {
-                        $this->deleteFile($fileId);
-                    } catch (\Throwable) {
-                        // ignore
+                    $response = $this->{$method}($params, $tmp, 'pcloud-health-check.txt');
+                    $meta = $response['metadata'][0] ?? $response['metadata'] ?? null;
+                    $fileId = is_array($meta) ? (int) ($meta['fileid'] ?? 0) : 0;
+                    if ($fileId > 0) {
+                        try {
+                            $this->deleteFile($fileId);
+                        } catch (\Throwable) {
+                            // ignore cleanup failure
+                        }
                     }
-                }
 
-                return ['ok' => true, 'method' => 'POST'];
-            } catch (\Throwable $postError) {
-                return [
-                    'ok' => false,
-                    'error' => $putError->getMessage() . ' | ' . $postError->getMessage(),
-                ];
+                    return ['ok' => true, 'method' => $label];
+                } catch (\Throwable $e) {
+                    $errors[] = $label . ': ' . $e->getMessage();
+                }
             }
+
+            return ['ok' => false, 'error' => implode(' | ', $errors)];
         } finally {
             @unlink($tmp);
         }
@@ -284,7 +266,92 @@ class PCloudService
     }
 
     /**
-     * PUT upload — auth in query string (same as userinfo GET). Most reliable on cPanel.
+     * cURL POST — auth in query string, file only in body (matches working userinfo GET pattern).
+     * Most reliable on cPanel where mod_security may strip access_token from POST fields.
+     *
+     * @param  array<string, mixed>  $params
+     * @return array<string, mixed>
+     */
+    protected function uploadViaCurl(array $params, string $filePath, string $filename): array
+    {
+        if (!function_exists('curl_init') || !function_exists('curl_file_create')) {
+            throw new \RuntimeException('PHP cURL extension is required for pCloud uploads');
+        }
+
+        unset($params['access_token'], $params['filename']);
+
+        $url = $this->uploadBaseUrl() . '/uploadfile?' . http_build_query(
+            $this->uploadQueryParams($params, $filename),
+            '',
+            '&',
+            PHP_QUERY_RFC3986
+        );
+
+        $mime = @mime_content_type($filePath) ?: MaterialFileHelper::mimeFromFilename($filename);
+
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => [
+                'file' => curl_file_create($filePath, $mime, $filename),
+            ],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 60,
+            CURLOPT_TIMEOUT => 3600,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_SSL_VERIFYPEER => true,
+        ]);
+
+        $body = curl_exec($ch);
+        $errno = curl_errno($ch);
+        $error = curl_error($ch);
+        $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($errno !== 0 || $body === false) {
+            throw new \RuntimeException('cURL upload to pCloud failed: ' . ($error ?: 'unknown cURL error'));
+        }
+
+        return $this->parseUploadJson((string) $body, 'cURL POST upload to pCloud failed (HTTP ' . $httpCode . ')');
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     * @return array<string, mixed>
+     */
+    protected function uploadChunkViaCurl(array $params, string $chunk, string $filename): array
+    {
+        if (!function_exists('curl_init')) {
+            throw new \RuntimeException('PHP cURL extension is required for pCloud uploads');
+        }
+
+        unset($params['access_token'], $params['filename']);
+
+        $query = array_merge($params, [
+            'access_token' => $this->accessToken,
+            'filename' => $filename,
+            'renameifexists' => 1,
+        ]);
+
+        $url = $this->uploadBaseUrl() . '/uploadfile?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986);
+
+        $tmp = tempnam(sys_get_temp_dir(), 'pcloud_chunk_');
+        if ($tmp === false) {
+            throw new \RuntimeException('Unable to create temp chunk file');
+        }
+
+        file_put_contents($tmp, $chunk);
+
+        try {
+            return $this->uploadViaCurl($params, $tmp, $filename);
+        } finally {
+            @unlink($tmp);
+        }
+    }
+
+    /**
+     * PUT upload — auth in query string (same as userinfo GET).
      *
      * @param  array<string, mixed>  $params
      * @return array<string, mixed>
@@ -371,16 +438,13 @@ class PCloudService
     {
         $errors = [];
 
-        try {
-            return $this->uploadViaPut($params, $filePath, $filename);
-        } catch (\Throwable $e) {
-            $errors[] = $e->getMessage();
-        }
-
-        try {
-            return $this->uploadViaMultipartPost($params, $filePath, $filename);
-        } catch (\Throwable $e) {
-            $errors[] = $e->getMessage();
+        foreach (['uploadViaCurl', 'uploadViaPut', 'uploadViaMultipartPost'] as $method) {
+            try {
+                return $this->{$method}($params, $filePath, $filename);
+            } catch (\Throwable $e) {
+                $errors[] = $method . ': ' . $e->getMessage();
+                Log::warning('pCloud upload attempt failed', ['method' => $method, 'error' => $e->getMessage()]);
+            }
         }
 
         throw new \RuntimeException('Upload to pCloud failed: ' . implode(' | ', $errors));
@@ -392,25 +456,25 @@ class PCloudService
      */
     protected function postUploadChunk(array $params, string $chunk, string $filename): array
     {
-        $url = $this->uploadBaseUrl() . '/uploadfile';
-
-        $multipart = [
-            ['name' => 'folderid', 'contents' => (string) ($params['folderid'] ?? 0)],
-            ['name' => 'access_token', 'contents' => (string) $this->accessToken],
-            ['name' => 'renameifexists', 'contents' => '1'],
-            ['name' => 'filename', 'contents' => $filename],
-        ];
-
-        foreach (['uploadoffset', 'uploadid'] as $key) {
-            if (array_key_exists($key, $params)) {
-                $multipart[] = ['name' => $key, 'contents' => (string) $params[$key]];
-            }
+        try {
+            return $this->uploadChunkViaCurl($params, $chunk, $filename);
+        } catch (\Throwable $curlError) {
+            Log::warning('pCloud chunk curl upload failed', ['error' => $curlError->getMessage()]);
         }
 
-        $multipart[] = [
-            'name' => 'file',
-            'contents' => $chunk,
-            'filename' => $filename,
+        $url = $this->uploadBaseUrl() . '/uploadfile?' . http_build_query(
+            array_merge($params, [
+                'access_token' => $this->accessToken,
+                'filename' => $filename,
+                'renameifexists' => 1,
+            ]),
+            '',
+            '&',
+            PHP_QUERY_RFC3986
+        );
+
+        $multipart = [
+            ['name' => 'file', 'contents' => $chunk, 'filename' => $filename],
         ];
 
         $response = Http::timeout(600)
@@ -418,6 +482,25 @@ class PCloudService
             ->send('POST', $url, ['multipart' => $multipart]);
 
         return $this->parseUploadResponse($response, 'Chunk upload to pCloud failed');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    protected function parseUploadJson(string $body, string $context): array
+    {
+        $json = json_decode($body, true);
+        if (!is_array($json)) {
+            Log::warning('pCloud upload invalid JSON', ['context' => $context, 'body' => substr($body, 0, 500)]);
+            throw new \RuntimeException($context . ': invalid JSON response');
+        }
+
+        if (($json['result'] ?? 1) !== 0) {
+            $error = (string) ($json['error'] ?? 'Unknown pCloud error');
+            throw new \RuntimeException($context . ': ' . $error);
+        }
+
+        return $json;
     }
 
     /**
@@ -434,17 +517,7 @@ class PCloudService
             throw new \RuntimeException($context . ': ' . ($response->body() ?: 'HTTP ' . $response->status()));
         }
 
-        $json = $response->json();
-        if (!is_array($json)) {
-            throw new \RuntimeException($context . ': invalid response');
-        }
-
-        if (($json['result'] ?? 1) !== 0) {
-            $error = (string) ($json['error'] ?? 'Unknown pCloud error');
-            throw new \RuntimeException($context . ': ' . $error);
-        }
-
-        return $json;
+        return $this->parseUploadJson((string) $response->body(), $context);
     }
 
     /**
