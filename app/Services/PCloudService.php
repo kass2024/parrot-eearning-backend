@@ -96,7 +96,111 @@ class PCloudService
 
     public function uploadBaseUrl(): string
     {
-        return 'https://upload.pcloud.com';
+        $configured = config('services.pcloud.upload_base_url');
+        if (is_string($configured) && trim($configured) !== '') {
+            return rtrim(trim($configured), '/');
+        }
+
+        // Official endpoint: https://api.pcloud.com/uploadfile (same host as API calls).
+        // upload.pcloud.com is legacy and often blocked/unresolvable on shared hosting.
+        return $this->baseUrl;
+    }
+
+    /**
+     * @return list<string>
+     */
+    protected function uploadEndpointCandidates(): array
+    {
+        $candidates = [
+            $this->uploadBaseUrl(),
+            $this->baseUrl,
+            'https://api.pcloud.com',
+            'https://eapi.pcloud.com',
+        ];
+
+        return array_values(array_unique(array_map(
+            fn (string $url) => rtrim($url, '/'),
+            array_filter($candidates)
+        )));
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     * @return array<string, mixed>
+     */
+    protected function postUploadFile(array $params, string $filePath, string $filename): array
+    {
+        $lastError = 'Unknown pCloud upload error';
+
+        foreach ($this->uploadEndpointCandidates() as $baseUrl) {
+            try {
+                $response = Http::timeout(3600)
+                    ->connectTimeout(60)
+                    ->asMultipart()
+                    ->attach('file', fopen($filePath, 'r'), $filename)
+                    ->post($baseUrl . '/uploadfile', $params);
+
+                if ($response->failed()) {
+                    $lastError = $response->body() ?: ('HTTP ' . $response->status());
+                    Log::warning('pCloud upload HTTP failure', [
+                        'url' => $baseUrl . '/uploadfile',
+                        'status' => $response->status(),
+                        'body' => $response->body(),
+                    ]);
+                    continue;
+                }
+
+                $json = $response->json();
+                if (is_array($json)) {
+                    return $json;
+                }
+
+                $lastError = 'Invalid pCloud upload response';
+            } catch (\Throwable $e) {
+                $lastError = $e->getMessage();
+                Log::warning('pCloud upload connection failure', [
+                    'url' => $baseUrl . '/uploadfile',
+                    'error' => $lastError,
+                ]);
+            }
+        }
+
+        throw new \RuntimeException('Upload to pCloud failed: ' . $lastError);
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     * @return array<string, mixed>
+     */
+    protected function postUploadChunk(array $params, string $chunk, string $filename): array
+    {
+        $lastError = 'Unknown pCloud upload error';
+
+        foreach ($this->uploadEndpointCandidates() as $baseUrl) {
+            try {
+                $response = Http::timeout(600)
+                    ->connectTimeout(60)
+                    ->asMultipart()
+                    ->attach('file', $chunk, $filename)
+                    ->post($baseUrl . '/uploadfile', $params);
+
+                if ($response->failed()) {
+                    $lastError = $response->body() ?: ('HTTP ' . $response->status());
+                    continue;
+                }
+
+                $json = $response->json();
+                if (is_array($json)) {
+                    return $json;
+                }
+
+                $lastError = 'Invalid pCloud upload response';
+            } catch (\Throwable $e) {
+                $lastError = $e->getMessage();
+            }
+        }
+
+        throw new \RuntimeException('Chunk upload to pCloud failed: ' . $lastError);
     }
 
     /**
@@ -247,12 +351,7 @@ class PCloudService
             $params['nopartial'] = 1;
         }
 
-        $response = Http::timeout(3600)
-            ->connectTimeout(60)
-            ->asMultipart()
-            ->attach('file', fopen($file->getRealPath(), 'r'), $file->getClientOriginalName())
-            ->post($this->uploadBaseUrl() . '/uploadfile', $params)
-            ->json();
+        $response = $this->postUploadFile($params, $file->getRealPath(), $file->getClientOriginalName());
 
         $this->assertOk($response, 'Upload to pCloud failed');
 
@@ -275,7 +374,6 @@ class PCloudService
         $path = $file->getRealPath();
         $totalSize = (int) $file->getSize();
         $filename = $file->getClientOriginalName();
-        $uploadUrl = $this->uploadBaseUrl() . '/uploadfile';
         $uploadId = null;
         $offset = 0;
         $handle = fopen($path, 'rb');
@@ -308,12 +406,7 @@ class PCloudService
                 $isFinal = ($offset + strlen($chunk)) >= $totalSize;
                 $attachName = $isFinal ? $filename : 'chunk.bin';
 
-                $response = Http::timeout(600)
-                    ->connectTimeout(60)
-                    ->asMultipart()
-                    ->attach('file', $chunk, $attachName)
-                    ->post($uploadUrl, $params)
-                    ->json();
+                $response = $this->postUploadChunk($params, $chunk, $attachName);
 
                 $this->assertOk($response, 'Chunk upload to pCloud failed');
 

@@ -66,6 +66,8 @@ return [
         'root_folder_id' => env('PCLOUD_ROOT_FOLDER_ID', 31887143130),
         'root_folder' => env('PCLOUD_ROOT_FOLDER', 'parrotacademy'),
         'base_url' => env('PCLOUD_API_URL', 'https://api.pcloud.com'),
+        // Defaults to base_url. Do NOT use upload.pcloud.com — DNS often fails on cPanel.
+        'upload_base_url' => env('PCLOUD_UPLOAD_URL'),
     ],
 
     'anthropic' => [
