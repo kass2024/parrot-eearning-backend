@@ -61,8 +61,8 @@ return new class extends Migration
                 $table->timestamp('released_at')->nullable();
                 $table->timestamps();
 
-                $table->index(['livezoom_cohort_id', 'status']);
-                $table->index(['livezoom_cohort_id', 'student_id']);
+                $table->index(['livezoom_cohort_id', 'status'], 'lz_queue_cohort_status_idx');
+                $table->index(['livezoom_cohort_id', 'student_id'], 'lz_queue_cohort_student_idx');
                 $table->index(['livezoom_cohort_id', 'guest_token'], 'lz_queue_cohort_guest_idx');
             });
         }

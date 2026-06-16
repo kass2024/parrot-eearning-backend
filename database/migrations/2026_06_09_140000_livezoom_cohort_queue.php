@@ -2,6 +2,7 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
@@ -14,7 +15,8 @@ return new class extends Migration
                     $table->string('zoom_link', 2048)->nullable()->after('notes');
                 }
                 if (!Schema::hasColumn('livezoom_cohort', 'session_status')) {
-                    $table->string('session_status', 20)->default('idle')->after('zoom_link');
+                    $after = Schema::hasColumn('livezoom_cohort', 'zoom_link') ? 'zoom_link' : 'notes';
+                    $table->string('session_status', 20)->default('idle')->after($after);
                 }
                 if (!Schema::hasColumn('livezoom_cohort', 'session_started_at')) {
                     $table->timestamp('session_started_at')->nullable()->after('session_status');
@@ -28,25 +30,25 @@ return new class extends Migration
             });
         }
 
-        if (Schema::hasTable('livezoom_cohort_queue_entries')) {
-            return;
+        if (!Schema::hasTable('livezoom_cohort_queue_entries') && Schema::hasTable('livezoom_cohort')) {
+            Schema::create('livezoom_cohort_queue_entries', function (Blueprint $table) {
+                $table->id();
+                $table->foreignId('livezoom_cohort_id')->constrained('livezoom_cohort')->cascadeOnDelete();
+                $table->unsignedBigInteger('student_id')->nullable();
+                $table->string('display_name');
+                $table->string('status', 20)->default('waiting');
+                $table->unsignedInteger('queue_position')->default(1);
+                $table->timestamp('joined_at');
+                $table->timestamp('admitted_at')->nullable();
+                $table->timestamp('released_at')->nullable();
+                $table->timestamps();
+
+                $table->index(['livezoom_cohort_id', 'status'], 'lz_queue_cohort_status_idx');
+                $table->index(['livezoom_cohort_id', 'student_id'], 'lz_queue_cohort_student_idx');
+            });
         }
 
-        Schema::create('livezoom_cohort_queue_entries', function (Blueprint $table) {
-            $table->id();
-            $table->foreignId('livezoom_cohort_id')->constrained('livezoom_cohort')->cascadeOnDelete();
-            $table->unsignedBigInteger('student_id')->nullable();
-            $table->string('display_name');
-            $table->string('status', 20)->default('waiting');
-            $table->unsignedInteger('queue_position')->default(1);
-            $table->timestamp('joined_at');
-            $table->timestamp('admitted_at')->nullable();
-            $table->timestamp('released_at')->nullable();
-            $table->timestamps();
-
-            $table->index(['livezoom_cohort_id', 'status']);
-            $table->index(['livezoom_cohort_id', 'student_id']);
-        });
+        $this->ensureQueueIndexes();
     }
 
     public function down(): void
@@ -64,5 +66,31 @@ return new class extends Migration
                 }
             }
         });
+    }
+
+    private function ensureQueueIndexes(): void
+    {
+        if (!Schema::hasTable('livezoom_cohort_queue_entries')) {
+            return;
+        }
+
+        if (!$this->indexExists('livezoom_cohort_queue_entries', 'lz_queue_cohort_status_idx')) {
+            Schema::table('livezoom_cohort_queue_entries', function (Blueprint $table) {
+                $table->index(['livezoom_cohort_id', 'status'], 'lz_queue_cohort_status_idx');
+            });
+        }
+
+        if (!$this->indexExists('livezoom_cohort_queue_entries', 'lz_queue_cohort_student_idx')) {
+            Schema::table('livezoom_cohort_queue_entries', function (Blueprint $table) {
+                $table->index(['livezoom_cohort_id', 'student_id'], 'lz_queue_cohort_student_idx');
+            });
+        }
+    }
+
+    private function indexExists(string $table, string $indexName): bool
+    {
+        $rows = DB::select("SHOW INDEX FROM `{$table}` WHERE Key_name = ?", [$indexName]);
+
+        return count($rows) > 0;
     }
 };
