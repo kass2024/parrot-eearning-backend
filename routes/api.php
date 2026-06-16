@@ -39,6 +39,7 @@ use App\Services\ZoomService;
 Route::prefix('admin')->group(function () {
     // System / schema (run before other routes on new servers)
     Route::get('system/health', [SystemController::class, 'health']);
+    Route::get('system/pcloud', [SystemController::class, 'pcloudHealth']);
     Route::post('system/migrate', [SystemController::class, 'migrate']);
 
     // Auth

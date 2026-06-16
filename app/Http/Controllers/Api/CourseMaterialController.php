@@ -199,6 +199,12 @@ class CourseMaterialController extends Controller
             ], 503);
         }
 
+        try {
+            $pcloud->resolveApiHost();
+        } catch (\Throwable $e) {
+            return response()->json(['message' => $e->getMessage()], 503);
+        }
+
         return response()->json($pcloud->directUploadConfig($course->id));
     }
 
@@ -265,6 +271,7 @@ class CourseMaterialController extends Controller
         ]);
 
         try {
+            $pcloud->resolveApiHost();
             $uploaded = $request->file('file');
             $pcloudFile = $pcloud->uploadToCourse($course->id, $uploaded);
 

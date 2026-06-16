@@ -17,18 +17,110 @@ class PCloudService
 
     protected ?int $rootFolderId = null;
 
+    protected ?string $resolvedApiHost = null;
+
     public function __construct()
     {
         $this->baseUrl = rtrim((string) config('services.pcloud.base_url', 'https://api.pcloud.com'), '/');
-        $token = config('services.pcloud.access_token') ?: env('PCLOUD_ACCESS_TOKEN');
-        $this->accessToken = is_string($token) && $token !== ''
-            ? trim($token, " \t\n\r\0\x0B\"'")
-            : null;
+        $this->accessToken = self::normalizeAccessToken(
+            config('services.pcloud.access_token') ?: env('PCLOUD_ACCESS_TOKEN')
+        );
         $this->rootFolder = trim((string) config('services.pcloud.root_folder', 'parrotacademy'), '/');
 
         $rootId = config('services.pcloud.root_folder_id') ?: env('PCLOUD_ROOT_FOLDER_ID', 31887143130);
         if (is_numeric($rootId) && (int) $rootId > 0) {
             $this->rootFolderId = (int) $rootId;
+        }
+    }
+
+    public static function normalizeAccessToken(mixed $token): ?string
+    {
+        if (!is_string($token)) {
+            return null;
+        }
+
+        $token = trim($token);
+        if ($token === '') {
+            return null;
+        }
+
+        // Strip wrapping quotes and UTF-8 BOM (common cPanel .env copy/paste issues).
+        $token = preg_replace('/^\xEF\xBB\xBF/', '', $token) ?? $token;
+        $token = trim($token, " \t\n\r\0\x0B\"'");
+
+        return $token !== '' ? $token : null;
+    }
+
+    /**
+     * Detect US (api.pcloud.com) vs EU (eapi.pcloud.com) for this token.
+     */
+    public function resolveApiHost(): string
+    {
+        if ($this->resolvedApiHost) {
+            return $this->resolvedApiHost;
+        }
+
+        $this->assertConfigured();
+
+        $hosts = array_values(array_unique(array_filter([
+            $this->baseUrl,
+            'https://api.pcloud.com',
+            'https://eapi.pcloud.com',
+        ])));
+
+        foreach ($hosts as $host) {
+            $host = rtrim($host, '/');
+            try {
+                $response = Http::timeout(25)->get($host . '/userinfo', [
+                    'access_token' => $this->accessToken,
+                ]);
+                $json = $response->json();
+                if (is_array($json) && ($json['result'] ?? 1) === 0) {
+                    $this->resolvedApiHost = $host;
+                    $this->baseUrl = $host;
+
+                    return $host;
+                }
+            } catch (\Throwable) {
+                continue;
+            }
+        }
+
+        throw new \RuntimeException(
+            'Invalid pCloud access token on this server. Set PCLOUD_ACCESS_TOKEN in cPanel .env to the same value as local, then run: php artisan config:clear && php artisan config:cache'
+        );
+    }
+
+    /**
+     * @return array{configured: bool, ok: bool, api_host?: string, root_folder_id?: int|null, email?: string|null, message?: string}
+     */
+    public function status(): array
+    {
+        if (!$this->isConfigured()) {
+            return [
+                'configured' => false,
+                'ok' => false,
+                'message' => 'PCLOUD_ACCESS_TOKEN is missing. Add it to the server .env file.',
+            ];
+        }
+
+        try {
+            $host = $this->resolveApiHost();
+            $info = $this->request('GET', '/userinfo');
+
+            return [
+                'configured' => true,
+                'ok' => true,
+                'api_host' => $host,
+                'root_folder_id' => $this->rootFolderId,
+                'email' => is_array($info) ? ($info['email'] ?? null) : null,
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'configured' => true,
+                'ok' => false,
+                'message' => $e->getMessage(),
+            ];
         }
     }
 
@@ -101,9 +193,7 @@ class PCloudService
             return rtrim(trim($configured), '/');
         }
 
-        // Official endpoint: https://api.pcloud.com/uploadfile (same host as API calls).
-        // upload.pcloud.com is legacy and often blocked/unresolvable on shared hosting.
-        return $this->baseUrl;
+        return $this->resolveApiHost();
     }
 
     /**
@@ -111,17 +201,19 @@ class PCloudService
      */
     protected function uploadEndpointCandidates(): array
     {
-        $candidates = [
-            $this->uploadBaseUrl(),
-            $this->baseUrl,
-            'https://api.pcloud.com',
-            'https://eapi.pcloud.com',
-        ];
+        return [$this->uploadBaseUrl()];
+    }
 
-        return array_values(array_unique(array_map(
-            fn (string $url) => rtrim($url, '/'),
-            array_filter($candidates)
-        )));
+    /**
+     * @param  array<string, mixed>  $params
+     */
+    protected function buildUploadUrl(array $params): string
+    {
+        $authParams = array_merge($params, [
+            'access_token' => $this->accessToken,
+        ]);
+
+        return $this->uploadBaseUrl() . '/uploadfile?' . http_build_query($authParams);
     }
 
     /**
@@ -130,42 +222,49 @@ class PCloudService
      */
     protected function postUploadFile(array $params, string $filePath, string $filename): array
     {
-        $lastError = 'Unknown pCloud upload error';
+        unset($params['access_token']);
 
-        foreach ($this->uploadEndpointCandidates() as $baseUrl) {
-            try {
-                $response = Http::timeout(3600)
-                    ->connectTimeout(60)
-                    ->asMultipart()
-                    ->attach('file', fopen($filePath, 'r'), $filename)
-                    ->post($baseUrl . '/uploadfile', $params);
-
-                if ($response->failed()) {
-                    $lastError = $response->body() ?: ('HTTP ' . $response->status());
-                    Log::warning('pCloud upload HTTP failure', [
-                        'url' => $baseUrl . '/uploadfile',
-                        'status' => $response->status(),
-                        'body' => $response->body(),
-                    ]);
-                    continue;
-                }
-
-                $json = $response->json();
-                if (is_array($json)) {
-                    return $json;
-                }
-
-                $lastError = 'Invalid pCloud upload response';
-            } catch (\Throwable $e) {
-                $lastError = $e->getMessage();
-                Log::warning('pCloud upload connection failure', [
-                    'url' => $baseUrl . '/uploadfile',
-                    'error' => $lastError,
-                ]);
-            }
+        $url = $this->buildUploadUrl($params);
+        $handle = fopen($filePath, 'rb');
+        if ($handle === false) {
+            throw new \RuntimeException('Unable to read uploaded file');
         }
 
-        throw new \RuntimeException('Upload to pCloud failed: ' . $lastError);
+        try {
+            $response = Http::timeout(3600)
+                ->connectTimeout(60)
+                ->asMultipart()
+                ->attach('file', $handle, $filename)
+                ->post($url);
+        } finally {
+            fclose($handle);
+        }
+
+        if ($response->failed()) {
+            Log::warning('pCloud upload HTTP failure', [
+                'url' => $this->uploadBaseUrl() . '/uploadfile',
+                'status' => $response->status(),
+                'body' => $response->body(),
+            ]);
+            throw new \RuntimeException('Upload to pCloud failed: ' . ($response->body() ?: 'HTTP ' . $response->status()));
+        }
+
+        $json = $response->json();
+        if (!is_array($json)) {
+            throw new \RuntimeException('Upload to pCloud failed: invalid response');
+        }
+
+        if (($json['result'] ?? 1) !== 0) {
+            $error = (string) ($json['error'] ?? 'Unknown pCloud error');
+            if (stripos($error, 'access_token') !== false) {
+                throw new \RuntimeException(
+                    'Invalid pCloud access token on cPanel. Copy PCLOUD_ACCESS_TOKEN from local .env to the server .env, then run: php artisan config:clear && php artisan config:cache'
+                );
+            }
+            throw new \RuntimeException('Upload to pCloud failed: ' . $error);
+        }
+
+        return $json;
     }
 
     /**
@@ -174,33 +273,30 @@ class PCloudService
      */
     protected function postUploadChunk(array $params, string $chunk, string $filename): array
     {
-        $lastError = 'Unknown pCloud upload error';
+        unset($params['access_token']);
 
-        foreach ($this->uploadEndpointCandidates() as $baseUrl) {
-            try {
-                $response = Http::timeout(600)
-                    ->connectTimeout(60)
-                    ->asMultipart()
-                    ->attach('file', $chunk, $filename)
-                    ->post($baseUrl . '/uploadfile', $params);
+        $url = $this->buildUploadUrl($params);
 
-                if ($response->failed()) {
-                    $lastError = $response->body() ?: ('HTTP ' . $response->status());
-                    continue;
-                }
+        $response = Http::timeout(600)
+            ->connectTimeout(60)
+            ->asMultipart()
+            ->attach('file', $chunk, $filename)
+            ->post($url);
 
-                $json = $response->json();
-                if (is_array($json)) {
-                    return $json;
-                }
-
-                $lastError = 'Invalid pCloud upload response';
-            } catch (\Throwable $e) {
-                $lastError = $e->getMessage();
-            }
+        if ($response->failed()) {
+            throw new \RuntimeException('Chunk upload to pCloud failed: ' . ($response->body() ?: 'HTTP ' . $response->status()));
         }
 
-        throw new \RuntimeException('Chunk upload to pCloud failed: ' . $lastError);
+        $json = $response->json();
+        if (!is_array($json)) {
+            throw new \RuntimeException('Chunk upload to pCloud failed: invalid response');
+        }
+
+        if (($json['result'] ?? 1) !== 0) {
+            throw new \RuntimeException('Chunk upload to pCloud failed: ' . ($json['error'] ?? 'Unknown pCloud error'));
+        }
+
+        return $json;
     }
 
     /**
@@ -507,7 +603,7 @@ class PCloudService
     protected function request(string $method, string $endpoint, array $params = []): array
     {
         $params['access_token'] = $this->accessToken;
-        $url = $this->baseUrl . $endpoint;
+        $url = $this->resolveApiHost() . $endpoint;
 
         $response = $method === 'GET'
             ? Http::get($url, $params)

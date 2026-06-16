@@ -8,9 +8,10 @@ use Illuminate\Http\Request;
 
 class SystemController extends Controller
 {
-    public function health(DatabaseSchemaService $schema)
+    public function health(DatabaseSchemaService $schema, \App\Services\PCloudService $pcloud)
     {
         $status = $schema->status();
+        $pcloudStatus = $pcloud->status();
 
         $http = ($status['database_connected'] && $status['schema_ready']) ? 200 : 503;
 
@@ -20,7 +21,15 @@ class SystemController extends Controller
                 ? 'Database schema is ready.'
                 : 'Database connected but schema is incomplete. Run migrations.',
             ...$status,
+            'pcloud' => $pcloudStatus,
         ], $http);
+    }
+
+    public function pcloudHealth(\App\Services\PCloudService $pcloud)
+    {
+        $status = $pcloud->status();
+
+        return response()->json($status, ($status['ok'] ?? false) ? 200 : 503);
     }
 
     public function migrate(Request $request, DatabaseSchemaService $schema)
