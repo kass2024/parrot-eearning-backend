@@ -9,6 +9,7 @@ use App\Services\LiveZoomCohortQueueService;
 use App\Services\LiveZoomCohortZoomService;
 use App\Support\LiveZoomCohortHelper;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
 
 class LiveZoomCohortController extends Controller
@@ -44,7 +45,9 @@ class LiveZoomCohortController extends Controller
 
         $data['timezone'] = $data['timezone'] ?? 'Africa/Kigali';
         $data['is_active'] = array_key_exists('is_active', $data) ? (bool) $data['is_active'] : true;
-        $data['session_status'] = 'idle';
+        if (Schema::hasColumn('livezoom_cohort', 'session_status')) {
+            $data['session_status'] = 'idle';
+        }
 
         if ($request->user()) {
             $data['created_by'] = $request->user()->id;
