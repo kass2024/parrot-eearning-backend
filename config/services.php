@@ -63,7 +63,7 @@ return [
 
     'pcloud' => [
         'access_token' => env('PCLOUD_ACCESS_TOKEN'),
-        'root_folder_id' => env('PCLOUD_ROOT_FOLDER_ID'),
+        'root_folder_id' => env('PCLOUD_ROOT_FOLDER_ID', 31887143130),
         'root_folder' => env('PCLOUD_ROOT_FOLDER', 'parrotacademy'),
         'base_url' => env('PCLOUD_API_URL', 'https://api.pcloud.com'),
     ],

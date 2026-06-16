@@ -259,29 +259,35 @@ class CourseMaterialController extends Controller
         }
 
         $validated = $request->validate([
-            'file' => 'required|file|max:512000',
+            'file' => 'required|file|max:1048576',
             'title' => 'nullable|string|max:255',
             'description' => 'nullable|string|max:2000',
         ]);
 
-        $uploaded = $request->file('file');
-        $pcloudFile = $pcloud->uploadToCourse($course->id, $uploaded);
+        try {
+            $uploaded = $request->file('file');
+            $pcloudFile = $pcloud->uploadToCourse($course->id, $uploaded);
 
-        $material = $this->createMaterialFromPCloudFile(
-            $course,
-            $pcloudFile,
-            $validated['title'] ?? null,
-            $validated['description'] ?? null,
-            $uploaded->getClientOriginalName(),
-            $uploaded->getSize(),
-            $uploaded->getMimeType()
-        );
+            $material = $this->createMaterialFromPCloudFile(
+                $course,
+                $pcloudFile,
+                $validated['title'] ?? null,
+                $validated['description'] ?? null,
+                $uploaded->getClientOriginalName(),
+                $uploaded->getSize(),
+                $uploaded->getMimeType()
+            );
 
-        return response()->json([
-            'message' => 'File uploaded to pCloud',
-            'material' => CourseMaterialHelper::toLearnerArray($material),
-            'pcloud' => $pcloudFile,
-        ], 201);
+            return response()->json([
+                'message' => 'File uploaded to pCloud',
+                'material' => CourseMaterialHelper::toLearnerArray($material),
+                'pcloud' => $pcloudFile,
+            ], 201);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'message' => 'Upload to pCloud failed: ' . $e->getMessage(),
+            ], 502);
+        }
     }
 
     /**

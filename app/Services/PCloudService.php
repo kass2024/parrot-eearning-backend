@@ -26,7 +26,7 @@ class PCloudService
             : null;
         $this->rootFolder = trim((string) config('services.pcloud.root_folder', 'parrotacademy'), '/');
 
-        $rootId = config('services.pcloud.root_folder_id') ?: env('PCLOUD_ROOT_FOLDER_ID');
+        $rootId = config('services.pcloud.root_folder_id') ?: env('PCLOUD_ROOT_FOLDER_ID', 31887143130);
         if (is_numeric($rootId) && (int) $rootId > 0) {
             $this->rootFolderId = (int) $rootId;
         }
@@ -61,9 +61,10 @@ class PCloudService
         $folder = $this->ensureCourseFolder($courseId);
 
         return [
+            'upload_mode' => 'api',
             'upload_url' => $this->uploadBaseUrl() . '/uploadfile',
             'folderid' => (int) $folder['folderid'],
-            'access_token' => (string) $this->accessToken,
+            'root_folderid' => $this->rootFolderId,
             'folder_path' => (string) $folder['path'],
         ];
     }
