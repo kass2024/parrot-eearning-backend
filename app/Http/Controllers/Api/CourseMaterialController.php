@@ -354,18 +354,13 @@ class CourseMaterialController extends Controller
             $contentType = (string) ($meta['contenttype'] ?? MaterialFileHelper::mimeFromFilename($filename));
 
             try {
-                if ($mode === 'preview') {
-                    return $pcloud->streamFileResponse($fileId, $filename, $contentType, true);
+                // Stream through Laravel so browser clients are not blocked by pCloud IP-bound links.
+                if ($mode === 'preview' || $mode === 'download' || $mode === 'video') {
+                    return $pcloud->streamFileResponse($fileId, $filename, $contentType, $mode !== 'download');
                 }
 
-                $url = match ($mode) {
-                    'thumb' => $pcloud->thumbnailUrl($fileId),
-                    'video' => $pcloud->videoLink($fileId),
-                    default => $pcloud->downloadLink($fileId),
-                };
-
-                if ($url !== '') {
-                    return redirect()->away($url);
+                if ($mode === 'thumb') {
+                    return redirect()->away($pcloud->thumbnailUrl($fileId));
                 }
             } catch (\Throwable $e) {
                 return response()->json(['message' => $e->getMessage()], 502);

@@ -36,20 +36,30 @@ class MaterialFileHelper
         };
     }
 
-    public static function isPCloudMaterial(?array $metadata): bool
-    {
-        return is_array($metadata) && ($metadata['storage'] ?? '') === 'pcloud' && !empty($metadata['pcloud_file_id']);
-    }
-
     public static function pcloudFileId(?array $metadata): ?int
     {
-        if (!self::isPCloudMaterial($metadata)) {
+        if (!is_array($metadata)) {
             return null;
         }
 
-        $id = (int) ($metadata['pcloud_file_id'] ?? 0);
+        $raw = $metadata['pcloud_file_id'] ?? $metadata['fileid'] ?? $metadata['file_id'] ?? null;
+        if ($raw === null || $raw === '') {
+            return null;
+        }
+
+        $id = (int) $raw;
 
         return $id > 0 ? $id : null;
+    }
+
+    public static function isPCloudMaterial(?array $metadata): bool
+    {
+        return self::pcloudFileId($metadata) !== null
+            && (
+                ($metadata['storage'] ?? '') === 'pcloud'
+                || isset($metadata['pcloud_file_id'])
+                || isset($metadata['fileid'])
+            );
     }
 
     public static function mimeFromFilename(string $filename): string

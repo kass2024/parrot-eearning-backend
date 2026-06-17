@@ -15,16 +15,24 @@ class CourseClassScheduledMail extends Mailable
     public Student $student;
     public Course $course;
     public string $startTime;
-    public string $zoomLink;
+    public string $joinLink;
     public ?string $notes;
+    public string $portalLink;
 
-    public function __construct(Student $student, Course $course, string $startTime, string $zoomLink, ?string $notes = null)
-    {
+    public function __construct(
+        Student $student,
+        Course $course,
+        string $startTime,
+        string $joinLink,
+        ?string $notes = null,
+        ?string $portalLink = null,
+    ) {
         $this->student = $student;
         $this->course = $course;
         $this->startTime = $startTime;
-        $this->zoomLink = $zoomLink;
+        $this->joinLink = $joinLink;
         $this->notes = $notes;
+        $this->portalLink = $portalLink ?: $joinLink;
     }
 
     public function build(): self
@@ -35,7 +43,8 @@ class CourseClassScheduledMail extends Mailable
                 'student' => $this->student,
                 'course' => $this->course,
                 'startTime' => $this->startTime,
-                'zoomLink' => $this->zoomLink,
+                'joinLink' => $this->joinLink,
+                'portalLink' => $this->portalLink,
                 'notes' => $this->notes,
             ]);
     }

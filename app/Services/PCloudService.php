@@ -673,7 +673,7 @@ class PCloudService
     public function streamFileResponse(int $fileId, string $filename, ?string $contentType = null, bool $inline = true): \Symfony\Component\HttpFoundation\StreamedResponse
     {
         $this->assertConfigured();
-        $url = $this->downloadLink($fileId);
+        $url = $this->downloadLink($fileId, !$inline);
         $mime = $contentType ?: MaterialFileHelper::mimeFromFilename($filename);
         $disposition = ($inline ? 'inline' : 'attachment') . '; filename="' . str_replace('"', '', $filename) . '"';
 
@@ -816,12 +816,60 @@ class PCloudService
         $this->assertOk($response, 'Unable to delete pCloud file');
     }
 
-    public function downloadLink(int $fileId): string
+    /**
+     * pCloud streaming APIs return hosts[] + path (not a single link field).
+     *
+     * @param  array<string, mixed>  $response
+     */
+    protected function buildLinkFromHostsResponse(array $response): string
     {
-        $response = $this->request('GET', '/getfilelink', ['fileid' => $fileId]);
+        $direct = (string) ($response['link'] ?? $response['metadata']['link'] ?? '');
+        if ($direct !== '') {
+            return $direct;
+        }
+
+        $path = (string) ($response['path'] ?? '');
+        if ($path === '') {
+            return '';
+        }
+
+        $hosts = $response['hosts'] ?? null;
+        if (!is_array($hosts) || $hosts === []) {
+            return '';
+        }
+
+        $host = rtrim((string) $hosts[0], '/');
+        if ($host === '') {
+            return '';
+        }
+
+        $base = str_starts_with($host, 'http://') || str_starts_with($host, 'https://')
+            ? $host
+            : 'https://' . $host;
+
+        if (!str_starts_with($path, '/')) {
+            $path = '/' . $path;
+        }
+
+        return $base . $path;
+    }
+
+    public function downloadLink(int $fileId, bool $forceDownload = false): string
+    {
+        $params = ['fileid' => $fileId];
+        if ($forceDownload) {
+            $params['forcedownload'] = 1;
+        }
+
+        $response = $this->request('GET', '/getfilelink', $params);
         $this->assertOk($response, 'Unable to resolve download link');
 
-        return (string) ($response['link'] ?? $response['metadata']['link'] ?? '');
+        $link = $this->buildLinkFromHostsResponse($response);
+        if ($link === '') {
+            throw new \RuntimeException('pCloud returned no download URL for file ' . $fileId);
+        }
+
+        return $link;
     }
 
     public function videoLink(int $fileId): string
@@ -832,14 +880,20 @@ class PCloudService
         ]);
         $this->assertOk($response, 'Unable to resolve video link');
 
-        return (string) ($response['link'] ?? $response['metadata']['link'] ?? '');
+        $link = $this->buildLinkFromHostsResponse($response);
+        if ($link === '') {
+            throw new \RuntimeException('pCloud returned no video URL for file ' . $fileId);
+        }
+
+        return $link;
     }
 
     public function thumbnailUrl(int $fileId, string $size = '800x800'): string
     {
         $this->assertConfigured();
+        $host = $this->resolveApiHost();
 
-        return $this->baseUrl . '/getthumb?' . http_build_query([
+        return $host . '/getthumb?' . http_build_query([
             'fileid' => $fileId,
             'access_token' => $this->accessToken,
             'size' => $size,

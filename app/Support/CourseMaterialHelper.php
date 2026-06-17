@@ -7,9 +7,8 @@ namespace App\Support;
 
 
 use App\Models\CourseMaterial;
-
 use App\Services\ZoomService;
-
+use App\Support\FrontendUrl;
 use Carbon\Carbon;
 
 
@@ -139,13 +138,39 @@ class CourseMaterialHelper
         return null;
     }
 
-    public static function embedRoomPath(CourseMaterial $material, int $role = 0): ?string
+    public static function embedRoomPath(CourseMaterial $material, int $role = 0, ?int $studentId = null): ?string
     {
         if (!self::meetingId($material)) {
             return null;
         }
 
-        return '/meeting/room?material_id=' . $material->id . '&role=' . $role;
+        $params = [
+            'material_id' => $material->id,
+            'role' => $role,
+        ];
+
+        if ($studentId !== null && $studentId > 0) {
+            $params['student_id'] = $studentId;
+        }
+
+        return '/meeting/room?' . http_build_query($params);
+    }
+
+    public static function embedRoomUrl(CourseMaterial $material, int $role = 0, ?int $studentId = null): ?string
+    {
+        $path = self::embedRoomPath($material, $role, $studentId);
+
+        return $path ? rtrim(FrontendUrl::base(), '/') . $path : null;
+    }
+
+    public static function learnerPortalUrl(): string
+    {
+        return rtrim(FrontendUrl::base(), '/') . '/dashboard/learner/live-classes';
+    }
+
+    public static function instructorClassesUrl(): string
+    {
+        return rtrim(FrontendUrl::base(), '/') . '/dashboard/classes';
     }
 
     public static function scheduledAt(CourseMaterial $material): ?Carbon

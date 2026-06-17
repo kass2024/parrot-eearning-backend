@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\CourseMaterial;
 use App\Models\LiveZoomCohort;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -1140,6 +1141,50 @@ class ZoomService
         $candidates[] = '';
 
         return array_values(array_unique($candidates, SORT_STRING));
+    }
+
+    /**
+     * Password variants for course live-class materials (Meeting SDK join).
+     *
+     * @return list<string>
+     */
+    public function resolveMaterialJoinPasswordCandidates(CourseMaterial $material, ?array $meetingDetails = null): array
+    {
+        $candidates = [];
+        $meta = is_array($material->metadata) ? $material->metadata : [];
+
+        foreach (['password', 'passcode', 'join_pwd', 'h323_password'] as $key) {
+            $value = $meta[$key] ?? null;
+            if (is_string($value) && trim($value) !== '') {
+                $candidates[] = trim($value);
+            }
+        }
+
+        if (is_array($meetingDetails) && empty($meetingDetails['error'])) {
+            foreach (['password', 'passcode', 'h323_password', 'encrypted_password'] as $key) {
+                $value = $meetingDetails[$key] ?? null;
+                if (is_string($value) && trim($value) !== '') {
+                    $candidates[] = trim($value);
+                }
+            }
+        }
+
+        $joinUrl = $meta['join_url'] ?? $material->resource_url ?? null;
+        $fromUrl = $this->extractPasswordFromJoinUrl(is_string($joinUrl) ? $joinUrl : null);
+        if ($fromUrl) {
+            $candidates[] = $fromUrl;
+        }
+
+        $candidates[] = '';
+
+        return array_values(array_unique($candidates, SORT_STRING));
+    }
+
+    public function resolveMaterialMeetingPassword(CourseMaterial $material, ?array $meetingDetails = null): string
+    {
+        $candidates = $this->resolveMaterialJoinPasswordCandidates($material, $meetingDetails);
+
+        return $candidates[0] ?? '';
     }
 
     public function pathwaysMeetingId(): ?string

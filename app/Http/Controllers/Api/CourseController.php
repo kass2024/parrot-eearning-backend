@@ -291,6 +291,7 @@ class CourseController extends Controller
         $zoomStartUrl = null;
         $zoomMeetingId = null;
         $zoomPassword = null;
+        $joinPwd = null;
 
         if (!$zoomJoinLink) {
             $hostId = (string) config('services.zoom.host_user_id', 'me');
@@ -330,6 +331,7 @@ class CourseController extends Controller
             $zoomStartUrl = $zoomData['start_url'] ?? null;
             $zoomMeetingId = $zoomData['id'] ?? null;
             $zoomPassword = $zoomData['password'] ?? null;
+            $joinPwd = $this->zoom->extractPasswordFromJoinUrl($zoomJoinLink);
 
             if (!$zoomJoinLink) {
                 return response()->json([
@@ -348,24 +350,13 @@ class CourseController extends Controller
             $staff = $request->user();
         }
 
-        if ($staff && !empty($staff->email)) {
-            $this->mail->sendTo(
-                $staff->email,
-                new StaffClassScheduledMail(
-                    $staff,
-                    $course,
-                    $data['start_time'],
-                    $zoomJoinLink,
-                    $data['notes'] ?? null
-                ),
-                ['event' => 'staff_class_scheduled', 'course_id' => $course->id, 'staff_id' => $staff->id]
-            );
-        }
-
         $notifyOnly = !empty($data['notify_only']);
         $material = null;
         if (!$notifyOnly) {
             $materialTitle = trim((string) ($data['topic'] ?? '')) ?: ('Live class - ' . Carbon::parse($data['start_time'])->format('M j, Y g:i A'));
+            if ($joinPwd === null && is_string($zoomJoinLink)) {
+                $joinPwd = $this->zoom->extractPasswordFromJoinUrl($zoomJoinLink);
+            }
             $material = CourseMaterial::create([
                 'course_id' => $course->id,
                 'title' => $materialTitle,
@@ -378,11 +369,32 @@ class CourseController extends Controller
                     'start_url' => $zoomStartUrl,
                     'meeting_id' => $zoomMeetingId,
                     'password' => $zoomPassword,
+                    'join_pwd' => $joinPwd,
                     'duration' => $data['duration'] ?? 60,
                     'timezone' => $data['timezone'] ?? config('app.timezone', 'UTC'),
                 ],
                 'sort_order' => 0,
             ]);
+        }
+
+        $hostRoomUrl = $material ? CourseMaterialHelper::embedRoomUrl($material, 1) : null;
+        $hostRoomPath = $material ? CourseMaterialHelper::embedRoomPath($material, 1) : null;
+        $learnerPortalUrl = CourseMaterialHelper::learnerPortalUrl();
+
+        if ($staff && !empty($staff->email)) {
+            $this->mail->sendTo(
+                $staff->email,
+                new StaffClassScheduledMail(
+                    $staff,
+                    $course,
+                    $data['start_time'],
+                    $hostRoomUrl ?? $learnerPortalUrl,
+                    $data['notes'] ?? null,
+                    $hostRoomUrl,
+                    CourseMaterialHelper::instructorClassesUrl(),
+                ),
+                ['event' => 'staff_class_scheduled', 'course_id' => $course->id, 'staff_id' => $staff->id]
+            );
         }
 
         $notifiedCount = 0;
@@ -398,14 +410,19 @@ class CourseController extends Controller
                 continue;
             }
 
+            $studentJoinUrl = $material
+                ? CourseMaterialHelper::embedRoomUrl($material, 0, (int) $student->id)
+                : $learnerPortalUrl;
+
             if ($this->mail->sendTo(
                 $student->email,
                 new CourseClassScheduledMail(
                     $student,
                     $course,
                     $data['start_time'],
-                    $zoomJoinLink,
-                    $data['notes'] ?? null
+                    $studentJoinUrl ?? $learnerPortalUrl,
+                    $data['notes'] ?? null,
+                    $learnerPortalUrl,
                 ),
                 ['event' => 'learner_class_scheduled', 'course_id' => $course->id, 'student_id' => $student->id]
             )) {
@@ -415,8 +432,9 @@ class CourseController extends Controller
 
         return response()->json([
             'message' => 'Class scheduled via Zoom API. Learners have been notified where possible.',
-            'zoom_join_url' => $zoomJoinLink,
-            'zoom_start_url' => $zoomStartUrl,
+            'host_room_url' => $hostRoomUrl,
+            'host_room_path' => $hostRoomPath,
+            'learner_portal_url' => $learnerPortalUrl,
             'zoom_meeting_id' => $zoomMeetingId,
             'students_notified' => $notifiedCount,
             'material' => $material ? CourseMaterialHelper::toLearnerArray($material) : null,

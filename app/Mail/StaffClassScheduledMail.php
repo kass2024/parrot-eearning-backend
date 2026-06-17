@@ -15,16 +15,27 @@ class StaffClassScheduledMail extends Mailable
     public User $staff;
     public Course $course;
     public string $startTime;
-    public string $zoomLink;
+    public string $joinLink;
     public ?string $notes;
+    public ?string $hostLink;
+    public ?string $dashboardLink;
 
-    public function __construct(User $staff, Course $course, string $startTime, string $zoomLink, ?string $notes = null)
-    {
+    public function __construct(
+        User $staff,
+        Course $course,
+        string $startTime,
+        string $joinLink,
+        ?string $notes = null,
+        ?string $hostLink = null,
+        ?string $dashboardLink = null,
+    ) {
         $this->staff = $staff;
         $this->course = $course;
         $this->startTime = $startTime;
-        $this->zoomLink = $zoomLink;
+        $this->joinLink = $joinLink;
         $this->notes = $notes;
+        $this->hostLink = $hostLink ?: $joinLink;
+        $this->dashboardLink = $dashboardLink;
     }
 
     public function build(): self
@@ -35,7 +46,9 @@ class StaffClassScheduledMail extends Mailable
                 'staff' => $this->staff,
                 'course' => $this->course,
                 'startTime' => $this->startTime,
-                'zoomLink' => $this->zoomLink,
+                'joinLink' => $this->joinLink,
+                'hostLink' => $this->hostLink,
+                'dashboardLink' => $this->dashboardLink,
                 'notes' => $this->notes,
             ]);
     }

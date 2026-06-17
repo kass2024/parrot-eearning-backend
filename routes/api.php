@@ -175,6 +175,7 @@ Route::prefix('admin')->group(function () {
     Route::get('instructor/live-classes', [InstructorDashboardController::class, 'liveClasses']);
     Route::post('instructor/live-classes/{material}/start', [InstructorDashboardController::class, 'startLiveSession']);
     Route::post('instructor/live-classes/{material}/sdk-auth', [ZoomEmbedController::class, 'instructorMaterialAuth']);
+    Route::post('instructor/live-classes/{material}/preview-sdk-auth', [ZoomEmbedController::class, 'instructorPreviewMaterialAuth']);
     Route::get('instructor/students', [InstructorDashboardController::class, 'students']);
     Route::get('instructor/quizzes', [InstructorDashboardController::class, 'quizzes']);
     Route::post('instructor/quizzes', [InstructorDashboardController::class, 'storeQuiz']);

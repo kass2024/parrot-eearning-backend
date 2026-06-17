@@ -109,6 +109,15 @@ class ZoomEmbedController extends Controller
         return $this->materialAuth($material, 1, $data);
     }
 
+    public function instructorPreviewMaterialAuth(Request $request, CourseMaterial $material): JsonResponse
+    {
+        $data = $request->validate([
+            'instructor_email' => 'required|email',
+        ]);
+
+        return $this->materialAuth($material, 0, array_merge($data, ['preview' => true]));
+    }
+
     public function webinarHostAuth(Request $request): JsonResponse
     {
         $data = $request->validate([
@@ -123,6 +132,8 @@ class ZoomEmbedController extends Controller
      */
     protected function materialAuth(CourseMaterial $material, int $role, array $data): JsonResponse
     {
+        $material->loadMissing('course');
+
         if (strtolower((string) $material->type) !== 'zoom') {
             return response()->json(['message' => 'This material is not a live class.'], 422);
         }
@@ -131,8 +142,6 @@ class ZoomEmbedController extends Controller
         if (!$meetingId) {
             return response()->json(['message' => 'No Zoom meeting ID for this session.'], 422);
         }
-
-        $password = CourseMaterialHelper::meetingPassword($material) ?? '';
 
         if ($role === 1) {
             $email = trim((string) ($data['instructor_email'] ?? ''));
@@ -147,36 +156,57 @@ class ZoomEmbedController extends Controller
 
             $userName = trim((string) ($instructor->name ?? '')) ?: 'Instructor';
         } else {
-            $studentId = (int) ($data['student_id'] ?? 0);
-            if ($studentId <= 0) {
-                return response()->json(['message' => 'Student ID is required to join.'], 422);
-            }
+            $preview = !empty($data['preview']);
+            $email = trim((string) ($data['instructor_email'] ?? ''));
 
-            $enrolled = CourseEnrollment::query()
-                ->where('course_id', $material->course_id)
-                ->where('student_id', $studentId)
-                ->whereIn('status', ['paid', 'completed'])
-                ->exists();
+            if ($preview && $email !== '') {
+                $instructor = User::query()->where('email', $email)->where('role', 'instructor')->first();
+                if (!$instructor || !$instructor->assignedCourses()->where('courses.id', $material->course_id)->exists()) {
+                    return response()->json(['message' => 'You are not authorized to preview this session.'], 403);
+                }
 
-            if (!$enrolled) {
-                return response()->json(['message' => 'You are not enrolled in this course.'], 403);
-            }
+                $userName = trim((string) ($instructor->name ?? '')) ?: 'Instructor preview';
+            } else {
+                $studentId = (int) ($data['student_id'] ?? 0);
+                if ($studentId <= 0) {
+                    return response()->json(['message' => 'Student ID is required to join.'], 422);
+                }
 
-            $state = CourseMaterialHelper::liveSessionState($material);
-            if (empty($state['can_join'])) {
-                return response()->json(['message' => 'This class is not live yet. Wait for the instructor to start.'], 403);
-            }
+                $enrolled = CourseEnrollment::query()
+                    ->where('course_id', $material->course_id)
+                    ->where('student_id', $studentId)
+                    ->whereIn('status', ['paid', 'completed'])
+                    ->exists();
 
-            $student = Student::query()->find($studentId);
-            if (!$student) {
-                return response()->json(['message' => 'Student not found.'], 404);
-            }
+                if (!$enrolled) {
+                    return response()->json(['message' => 'You are not enrolled in this course.'], 403);
+                }
 
-            $userName = trim(($student->first_name ?? '') . ' ' . ($student->last_name ?? ''));
-            if ($userName === '') {
-                $userName = (string) ($student->email ?? 'Learner');
+                $state = CourseMaterialHelper::liveSessionState($material);
+                if (empty($state['can_join'])) {
+                    return response()->json(['message' => 'This class is not live yet. Wait for the instructor to start.'], 403);
+                }
+
+                $student = Student::query()->find($studentId);
+                if (!$student) {
+                    return response()->json(['message' => 'Student not found.'], 404);
+                }
+
+                $userName = trim(($student->first_name ?? '') . ' ' . ($student->last_name ?? ''));
+                if ($userName === '') {
+                    $userName = (string) ($student->email ?? 'Learner');
+                }
             }
         }
+
+        $meetingDetails = null;
+        $fetched = $this->zoomService->getMeeting($meetingId);
+        if (is_array($fetched) && empty($fetched['error'])) {
+            $meetingDetails = $fetched;
+        }
+
+        $passwordCandidates = $this->zoomService->resolveMaterialJoinPasswordCandidates($material, $meetingDetails);
+        $password = $passwordCandidates[0] ?? (CourseMaterialHelper::meetingPassword($material) ?? '');
 
         try {
             $payload = $this->sdkService->buildJoinPayload(
@@ -190,7 +220,17 @@ class ZoomEmbedController extends Controller
             return response()->json(['message' => $e->getMessage()], 422);
         }
 
-        return response()->json(['sdk' => $payload]);
+        $payload['password_candidates'] = $passwordCandidates;
+
+        return response()->json([
+            'sdk' => $payload,
+            'material' => [
+                'id' => $material->id,
+                'title' => $material->title,
+                'course_title' => $material->course?->title,
+            ],
+            'preview' => !empty($data['preview']),
+        ]);
     }
 
     /**

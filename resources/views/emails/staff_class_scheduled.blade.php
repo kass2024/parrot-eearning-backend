@@ -15,11 +15,12 @@
         .greeting { font-size: 16px; margin-bottom: 16px; }
         .paragraph { font-size: 14px; line-height: 1.6; margin: 0 0 12px; color: #374151; }
         .info-box { background-color: #eff6ff; border-radius: 10px; padding: 14px 16px; border: 1px solid #bfdbfe; margin: 18px 0; font-size: 13px; }
-        .info-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+        .info-row { display: flex; justify-content: space-between; margin-bottom: 4px; gap: 12px; }
         .info-label { color: #6b7280; }
-        .info-value { font-weight: 600; color: #111827; }
+        .info-value { font-weight: 600; color: #111827; text-align: right; }
         .footer { padding: 14px 28px 18px; border-top: 1px solid #e5e7eb; background-color: #f9fafb; font-size: 11px; color: #9ca3af; text-align: center; }
-        a.btn { display: inline-block; padding: 8px 16px; background-color: #1d4ed8; color: #f9fafb; text-decoration: none; border-radius: 999px; font-size: 13px; font-weight: 600; }
+        a.btn { display: inline-block; padding: 10px 18px; background-color: #1d4ed8; color: #f9fafb !important; text-decoration: none; border-radius: 999px; font-size: 13px; font-weight: 600; }
+        a.link { color: #1d4ed8; word-break: break-all; }
     </style>
 </head>
 <body>
@@ -38,20 +39,30 @@
       <div class="info-box">
         <div class="info-row">
           <span class="info-label">Date &amp; time</span>
-          <span class="info-value">{{ $startTime }}</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">Join link</span>
-          <span class="info-value"><a href="{{ $zoomLink }}" style="color:#1d4ed8;">Open Zoom meeting</a></span>
+          <span class="info-value">{{ \Carbon\Carbon::parse($startTime)->toDayDateTimeString() }}</span>
         </div>
       </div>
       @if(!empty($notes))
-        <p class="paragraph"><strong>Notes from admin:</strong></p>
-        <p class="paragraph">{{ $notes }}</p>
+        <p class="paragraph"><strong>Notes:</strong> {{ $notes }}</p>
       @endif
-      <p class="paragraph" style="margin-top: 20px;">
-        You can share this link with your learners or manage materials from your dashboard.
+      <p class="paragraph">
+        Host this session in your browser — audio, video, screen share, chat, and participants are built in.
       </p>
+      @if(!empty($hostLink))
+        <p class="paragraph">
+          <a href="{{ $hostLink }}" class="btn">Start in app (host studio)</a>
+        </p>
+        <p class="paragraph">
+          Host link:<br>
+          <a href="{{ $hostLink }}" class="link">{{ $hostLink }}</a>
+        </p>
+      @endif
+      @if(!empty($dashboardLink))
+        <p class="paragraph">
+          Manage sessions from your dashboard:<br>
+          <a href="{{ $dashboardLink }}" class="link">{{ $dashboardLink }}</a>
+        </p>
+      @endif
       <p class="paragraph" style="margin-top: 20px;">
         Best regards,<br>
         <strong>{{ config('app.name') }}</strong>
