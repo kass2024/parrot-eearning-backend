@@ -15,7 +15,7 @@ class LearningHubDemoSeeder extends Seeder
 {
     public function run(): void
     {
-        $demoPassword = (string) config('platform.seed_password');
+        $demoPassword = PlatformUserService::seedPassword();
 
         $instructor = User::updateOrCreate(
             ['email' => 'instructor@parrotglobalstudyacademy.ca'],

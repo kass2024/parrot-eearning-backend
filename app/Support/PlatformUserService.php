@@ -5,6 +5,7 @@ namespace App\Support;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 
 class PlatformUserService
@@ -38,6 +39,13 @@ class PlatformUserService
         return strtolower(trim($email));
     }
 
+    public static function seedPassword(): string
+    {
+        $value = (string) config('platform.seed_password');
+
+        return trim($value, " \t\n\r\0\x0B'\"");
+    }
+
     public static function storedPasswordHash(Model $record): string
     {
         if (method_exists($record, 'getRawOriginal')) {
@@ -66,7 +74,50 @@ class PlatformUserService
     }
 
     /**
-     * Remove duplicate users that share the same email (keeps newest row).
+     * @return list<array{normalized_email: string, count: int}>
+     */
+    public static function findNormalizedDuplicateGroups(): array
+    {
+        if (!Schema::hasTable('users')) {
+            return [];
+        }
+
+        return DB::table('users')
+            ->selectRaw('LOWER(TRIM(email)) as normalized_email, COUNT(*) as count')
+            ->groupByRaw('LOWER(TRIM(email))')
+            ->havingRaw('COUNT(*) > 1')
+            ->orderBy('normalized_email')
+            ->get()
+            ->map(fn ($row) => [
+                'normalized_email' => (string) $row->normalized_email,
+                'count' => (int) $row->count,
+            ])
+            ->all();
+    }
+
+    public static function normalizeStoredEmails(): int
+    {
+        if (!Schema::hasTable('users')) {
+            return 0;
+        }
+
+        $updated = 0;
+
+        foreach (User::query()->get(['id', 'email']) as $user) {
+            $normalized = self::normalizeEmail((string) $user->email);
+            if ($normalized === '' || $normalized === (string) $user->email) {
+                continue;
+            }
+
+            DB::table('users')->where('id', $user->id)->update(['email' => $normalized]);
+            $updated++;
+        }
+
+        return $updated;
+    }
+
+    /**
+     * Remove duplicate users that share the same normalized email (keeps newest row).
      */
     public static function dedupeDuplicateEmails(): int
     {
@@ -74,17 +125,15 @@ class PlatformUserService
             return 0;
         }
 
+        self::normalizeStoredEmails();
+
         $removed = 0;
 
-        $duplicateEmails = DB::table('users')
-            ->select('email')
-            ->groupBy('email')
-            ->havingRaw('COUNT(*) > 1')
-            ->pluck('email');
+        foreach (self::findNormalizedDuplicateGroups() as $group) {
+            $normalized = $group['normalized_email'];
 
-        foreach ($duplicateEmails as $email) {
             $rows = DB::table('users')
-                ->where('email', $email)
+                ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
                 ->orderByDesc('updated_at')
                 ->orderByDesc('id')
                 ->get();
@@ -92,6 +141,10 @@ class PlatformUserService
             $keeper = $rows->first();
             if ($keeper === null) {
                 continue;
+            }
+
+            if ($keeper->email !== $normalized) {
+                DB::table('users')->where('id', $keeper->id)->update(['email' => $normalized]);
             }
 
             foreach ($rows->slice(1) as $duplicate) {
@@ -135,87 +188,36 @@ class PlatformUserService
 
     public static function resetPlatformUserPasswords(?string $plainPassword = null): int
     {
-        $plainPassword ??= (string) config('platform.seed_password');
+        $plainPassword = trim((string) ($plainPassword ?? self::seedPassword()), " \t\n\r\0\x0B'\"");
+        $hash = Hash::make($plainPassword);
         $updated = 0;
 
         foreach (self::PLATFORM_EMAILS as $email) {
-            $user = User::query()->whereRaw('LOWER(TRIM(email)) = ?', [self::normalizeEmail($email)])->first();
-            if (!$user) {
-                continue;
-            }
+            $normalized = self::normalizeEmail($email);
+            $count = DB::table('users')
+                ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
+                ->update([
+                    'password' => $hash,
+                    'updated_at' => now(),
+                ]);
 
-            $user->password = $plainPassword;
-            $user->save();
-            $updated++;
+            $updated += $count;
         }
 
         return $updated;
     }
 
-    /**
-     * @return array<string, mixed>
-     */
-    public static function debugLogin(string $username, string $password): array
+    public static function resetPasswordForEmail(string $email, string $plainPassword): int
     {
-        $normalized = self::normalizeEmail($username);
-        $report = [
-            'username' => $username,
-            'normalized_email' => $normalized,
-            'expected_seed_password' => (string) config('platform.seed_password'),
-            'users' => [],
-            'students' => [],
-            'agents' => [],
-            'duplicate_emails' => [],
-        ];
+        $normalized = self::normalizeEmail($email);
+        $hash = Hash::make(trim($plainPassword, " \t\n\r\0\x0B'\""));
 
-        if (Schema::hasTable('users')) {
-            $report['duplicate_emails'] = DB::table('users')
-                ->select('email', DB::raw('COUNT(*) as count'))
-                ->groupBy('email')
-                ->havingRaw('COUNT(*) > 1')
-                ->get()
-                ->map(fn ($row) => ['email' => $row->email, 'count' => (int) $row->count])
-                ->all();
-
-            $users = User::query()
-                ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
-                ->orWhere('name', $username)
-                ->orderBy('id')
-                ->get();
-
-            foreach ($users as $user) {
-                $stored = self::storedPasswordHash($user);
-                $report['users'][] = [
-                    'id' => $user->id,
-                    'name' => $user->name,
-                    'email' => $user->email,
-                    'role' => $user->role,
-                    'status' => $user->status,
-                    'updated_at' => (string) $user->updated_at,
-                    'hash_prefix' => substr($stored, 0, 7),
-                    'password_matches' => self::verifyPassword($user, $password),
-                ];
-            }
-        }
-
-        if (Schema::hasTable('students')) {
-            $students = \App\Models\Student::query()
-                ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
-                ->orderBy('id')
-                ->get();
-
-            foreach ($students as $student) {
-                $stored = self::storedPasswordHash($student);
-                $report['students'][] = [
-                    'id' => $student->id,
-                    'status' => $student->status,
-                    'hash_prefix' => substr($stored, 0, 7),
-                    'password_matches' => self::verifyPassword($student, $password),
-                ];
-            }
-        }
-
-        return $report;
+        return DB::table('users')
+            ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
+            ->update([
+                'password' => $hash,
+                'updated_at' => now(),
+            ]);
     }
 
     private static function reassignUserForeignKeys(int $fromUserId, int $toUserId): void

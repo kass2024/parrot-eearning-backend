@@ -4,6 +4,7 @@ namespace Database\Seeders;
 
 use App\Models\User;
 use App\Support\PlatformUserService;
+use App\Support\PlatformUserService;
 use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
 
@@ -16,7 +17,7 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        $plainPassword = (string) config('platform.seed_password');
+        $plainPassword = PlatformUserService::seedPassword();
 
         PlatformUserService::dedupeDuplicateEmails();
         PlatformUserService::deleteLegacyEmails();

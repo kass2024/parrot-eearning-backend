@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Support\PlatformUserService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 
 class RepairPlatformUsers extends Command
@@ -35,17 +36,17 @@ class RepairPlatformUsers extends Command
             return self::SUCCESS;
         }
 
-        $duplicates = DB::table('users')
-            ->select('email', DB::raw('COUNT(*) as count'))
-            ->groupBy('email')
-            ->havingRaw('COUNT(*) > 1')
-            ->get();
-
-        if ($duplicates->isNotEmpty()) {
-            $this->warn('Duplicate emails found:');
-            foreach ($duplicates as $row) {
-                $this->line("  {$row->email} ({$row->count} rows)");
+        $normalizedDupes = PlatformUserService::findNormalizedDuplicateGroups();
+        if ($normalizedDupes !== []) {
+            $this->warn('Normalized duplicate emails found:');
+            foreach ($normalizedDupes as $row) {
+                $this->line("  {$row['normalized_email']} ({$row['count']} rows)");
             }
+        }
+
+        $normalized = PlatformUserService::normalizeStoredEmails();
+        if ($normalized > 0) {
+            $this->info("Normalized {$normalized} stored email value(s).");
         }
 
         $removed = PlatformUserService::dedupeDuplicateEmails();
@@ -59,9 +60,9 @@ class RepairPlatformUsers extends Command
             $this->warn('Could not add unique email index: ' . $e->getMessage());
         }
 
-        $plain = (string) ($this->option('password') ?: config('platform.seed_password'));
+        $plain = trim((string) ($this->option('password') ?: PlatformUserService::seedPassword()), " \t\n\r\0\x0B'\"");
         $updated = PlatformUserService::resetPlatformUserPasswords($plain);
-        $this->info("Reset password on {$updated} platform account(s).");
+        $this->info("Reset password on {$updated} user row(s).");
 
         $this->newLine();
         $this->line('Platform logins:');
@@ -79,21 +80,29 @@ class RepairPlatformUsers extends Command
 
         $this->info("Login debug for: {$email}");
         $this->line('Normalized email: ' . $normalized);
-        $this->line('Seed password config: ' . (string) config('platform.seed_password'));
+        $this->line('Seed password config: ' . PlatformUserService::seedPassword());
         $this->newLine();
 
-        $dupes = DB::table('users')
+        $normalizedDupes = PlatformUserService::findNormalizedDuplicateGroups();
+        if ($normalizedDupes === []) {
+            $this->info('No normalized duplicate user emails.');
+        } else {
+            $this->error('Normalized duplicate emails (same inbox, different stored values):');
+            foreach ($normalizedDupes as $row) {
+                $this->line("  {$row['normalized_email']}: {$row['count']} rows");
+            }
+        }
+
+        $exactDupes = DB::table('users')
             ->select('email', DB::raw('COUNT(*) as count'))
             ->groupBy('email')
             ->havingRaw('COUNT(*) > 1')
             ->get();
 
-        if ($dupes->isEmpty()) {
-            $this->info('No duplicate user emails.');
-        } else {
-            $this->error('Duplicate user emails (login may hit the wrong row):');
-            foreach ($dupes as $row) {
-                $this->line("  {$row->email}: {$row->count} rows");
+        if ($exactDupes->isNotEmpty()) {
+            $this->warn('Exact-string duplicate emails:');
+            foreach ($exactDupes as $row) {
+                $this->line("  [{$row->email}] ({$row->count} rows)");
             }
         }
 
@@ -111,8 +120,13 @@ class RepairPlatformUsers extends Command
         foreach ($users as $user) {
             $stored = PlatformUserService::storedPasswordHash($user);
             $matches = PlatformUserService::verifyPassword($user, $password) ? 'YES' : 'NO';
-            $this->line("  id={$user->id} role={$user->role} status={$user->status} updated={$user->updated_at} hash={$stored} matches={$matches}");
+            $rawEmail = (string) $user->getRawOriginal('email');
+            $this->line("  id={$user->id} raw_email=[{$rawEmail}] len=" . strlen($rawEmail) . " role={$user->role} status={$user->status} updated={$user->updated_at} matches={$matches}");
         }
+
+        $seedMatches = password_verify(PlatformUserService::seedPassword(), Hash::make(PlatformUserService::seedPassword())) ? 'YES' : 'NO';
+        $this->newLine();
+        $this->line("Config seed password verifies against fresh hash: {$seedMatches}");
 
         if (Schema::hasTable('students')) {
             $this->newLine();
