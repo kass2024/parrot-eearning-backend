@@ -16,9 +16,7 @@
 /public/build
 /public/hot
 /public/storage
-/storage
 /vendor
-.htaccess
 .env.cpanel
 Homestead.json
 Homestead.yaml
