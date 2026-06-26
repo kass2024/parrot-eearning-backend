@@ -232,7 +232,7 @@
             </p>
             <p>
                 For assistance, contact
-                <a href="mailto:info@xanderglobalscholars.com">info@xanderglobalscholars.com</a>
+                <a href="mailto:{{ config('platform.contact_email') }}">{{ config('platform.contact_email') }}</a>
             </p>
         </div>
     </div>

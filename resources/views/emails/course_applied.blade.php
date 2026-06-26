@@ -52,7 +52,7 @@
             <p>You are receiving this email because a course application was submitted using your email address.</p>
             <p>
                 For assistance, contact
-                <a href="mailto:info@xanderglobalscholars.coms">info@xanderglobalscholars.coms</a>
+                <a href="mailto:{{ config('platform.contact_email') }}">{{ config('platform.contact_email') }}</a>
             </p>
         </div>
     </div>

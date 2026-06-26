@@ -475,7 +475,7 @@ class LiveZoomCohortController extends Controller
                     'avatar_url' => $avatarUrl,
                 ],
                 'company' => [
-                    'name' => (string) config('app.name', 'Xander Learning Hub'),
+                    'name' => (string) config('app.name', 'parrotglobalstudyacademy'),
                 ],
                 'cohort_title' => $cohortTitle,
             ]);
@@ -788,7 +788,7 @@ class LiveZoomCohortController extends Controller
             'name' => $name,
             'email' => $user?->email,
             'avatar_url' => $avatarUrl,
-            'company_name' => (string) config('app.name', 'Xander Learning Hub'),
+            'company_name' => (string) config('app.name', 'parrotglobalstudyacademy'),
         ];
     }
 

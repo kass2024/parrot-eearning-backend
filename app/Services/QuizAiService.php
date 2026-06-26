@@ -423,7 +423,7 @@ class QuizAiService
         $difficulty = in_array($difficulty, ['easy', 'medium', 'hard', 'mixed'], true) ? $difficulty : 'medium';
 
         return <<<PROMPT
-You are an expert assessment designer for Xander Learning Hub.
+You are an expert assessment designer for parrotglobalstudyacademy.
 
 Generate exactly {$count} quiz questions with difficulty "{$difficulty}" focused on topic "{$topic}".
 

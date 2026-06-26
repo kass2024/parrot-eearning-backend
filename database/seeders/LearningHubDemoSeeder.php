@@ -14,21 +14,23 @@ class LearningHubDemoSeeder extends Seeder
 {
     public function run(): void
     {
+        $demoPassword = bcrypt((string) config('platform.seed_password'));
+
         $instructor = User::updateOrCreate(
-            ['email' => 'instructor@parrot.com'],
+            ['email' => 'instructor@parrotglobalstudyacademy.ca'],
             [
                 'name' => 'Instructor User',
-                'password' => bcrypt('1234'),
+                'password' => $demoPassword,
                 'role' => 'instructor',
                 'status' => 'Active',
             ]
         );
 
         $instructorTwo = User::updateOrCreate(
-            ['email' => 'instructor2@parrot.com'],
+            ['email' => 'instructor2@parrotglobalstudyacademy.ca'],
             [
                 'name' => 'Jane Smith',
-                'password' => bcrypt('1234'),
+                'password' => $demoPassword,
                 'role' => 'instructor',
                 'status' => 'Active',
             ]

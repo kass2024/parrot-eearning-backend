@@ -15,39 +15,36 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
+        $password = bcrypt((string) config('platform.seed_password'));
+
+        $this->migrateLegacyPlatformUsers($password);
+
         User::updateOrCreate(
-            ['email' => 'admin@parrot.com'],
+            ['email' => 'infos@parrotglobalstudyacademy.ca'],
             [
-                'name' => 'Admin User',
-                'password' => bcrypt('1234'),
+                'name' => 'Parrot Canada Visa Consultant',
+                'password' => $password,
                 'role' => 'admin',
+                'status' => 'Active',
             ]
         );
 
         User::updateOrCreate(
-            ['email' => 'instructor@parrot.com'],
+            ['email' => 'instructor@parrotglobalstudyacademy.ca'],
             [
                 'name' => 'Instructor User',
-                'password' => bcrypt('1234'),
+                'password' => $password,
                 'role' => 'instructor',
+                'status' => 'Active',
             ]
         );
 
         User::updateOrCreate(
-            ['email' => 'staff@parrot.com'],
+            ['email' => 'staff@parrotglobalstudyacademy.ca'],
             [
                 'name' => 'Staff User',
-                'password' => bcrypt('1234'),
+                'password' => $password,
                 'role' => 'staff',
-            ]
-        );
-
-        User::updateOrCreate(
-            ['email' => 'info@xanderglobalscholars.com'],
-            [
-                'name' => 'Xander Global Scholars',
-                'password' => bcrypt('12345678'),
-                'role' => 'admin',
                 'status' => 'Active',
             ]
         );
@@ -56,5 +53,17 @@ class DatabaseSeeder extends Seeder
             AvailableScheduleSeeder::class,
             LearningHubDemoSeeder::class,
         ]);
+    }
+
+    private function migrateLegacyPlatformUsers(string $passwordHash): void
+    {
+        $legacyEmails = [
+            'info@xanderglobalscholars.com',
+            'admin@parrot.com',
+            'instructor@parrot.com',
+            'staff@parrot.com',
+        ];
+
+        User::whereIn('email', $legacyEmails)->delete();
     }
 }

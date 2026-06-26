@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Expected database schema for Xander Learning Hub.
+ * Expected database schema for parrotglobalstudyacademy.
  * Used by DatabaseSchemaService to detect incomplete deployments and trigger auto-migrate.
  * When adding a migration, append the table/columns here (or add to sync_parrot_hub_schema migration).
  */

@@ -11,7 +11,7 @@ class CertificateController extends Controller
 {
     public static function certificateId(int $studentId, int $courseId): string
     {
-        return 'XGS-' . str_pad((string) $studentId, 4, '0', STR_PAD_LEFT) . '-' . str_pad((string) $courseId, 4, '0', STR_PAD_LEFT);
+        return (string) config('platform.certificate_prefix', 'PGS') . '-' . str_pad((string) $studentId, 4, '0', STR_PAD_LEFT) . '-' . str_pad((string) $courseId, 4, '0', STR_PAD_LEFT);
     }
 
     public static function verifyUrl(int $courseId, int $studentId): string
@@ -61,7 +61,7 @@ class CertificateController extends Controller
                 'enrollment_status' => $enrollment->status,
                 'issued_at' => $enrollment->updated_at?->toIso8601String(),
                 'verify_url' => self::verifyUrl($courseId, $studentId),
-                'issuer' => config('app.name', 'Xander Global Scholars'),
+                'issuer' => config('app.name', 'parrotglobalstudyacademy'),
                 'issuer_tagline' => 'Study. Learn. Succeed Globally.',
             ],
         ], 200);

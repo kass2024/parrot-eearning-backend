@@ -57,9 +57,10 @@ class RebuildCorruptedDatabase extends Command
         $this->info('Database rebuild complete.');
 
         if ($this->option('seed')) {
-            $this->line('Default logins:');
-            $this->line('  admin@parrot.com / 1234');
-            $this->line('  info@xanderglobalscholars.com / 12345678');
+            $this->line('Default logins (password from SEED_PLATFORM_PASSWORD or Parrot@2025):');
+            $this->line('  infos@parrotglobalstudyacademy.ca');
+            $this->line('  instructor@parrotglobalstudyacademy.ca');
+            $this->line('  staff@parrotglobalstudyacademy.ca');
         }
 
         return self::SUCCESS;
