@@ -28,7 +28,6 @@ class PlatformUserService
 
     /** @var list<array{table: string, column: string}> */
     private const USER_FOREIGN_KEYS = [
-        ['table' => 'assign_cours', 'column' => 'user_id'],
         ['table' => 'meeting_registrations', 'column' => 'user_id'],
         ['table' => 'livezoom_cohort', 'column' => 'created_by'],
         ['table' => 'available_schedules', 'column' => 'created_by'],
@@ -156,9 +155,11 @@ class PlatformUserService
                 }
 
                 foreach ($rows->slice(1) as $duplicate) {
-                    self::reassignUserForeignKeys((int) $duplicate->id, (int) $keeper->id);
-                    DB::table('users')->where('id', $duplicate->id)->delete();
-                    $removed++;
+                    DB::transaction(function () use ($duplicate, $keeper, &$removed) {
+                        self::mergeUserReferences((int) $duplicate->id, (int) $keeper->id);
+                        DB::table('users')->where('id', $duplicate->id)->delete();
+                        $removed++;
+                    });
                 }
 
                 if ((string) $keeper->email !== $normalized) {
@@ -233,8 +234,10 @@ class PlatformUserService
             ]);
     }
 
-    private static function reassignUserForeignKeys(int $fromUserId, int $toUserId): void
+    private static function mergeUserReferences(int $fromUserId, int $toUserId): void
     {
+        self::mergeAssignCours($fromUserId, $toUserId);
+
         foreach (self::USER_FOREIGN_KEYS as $fk) {
             if (!Schema::hasTable($fk['table']) || !Schema::hasColumn($fk['table'], $fk['column'])) {
                 continue;
@@ -243,6 +246,37 @@ class PlatformUserService
             DB::table($fk['table'])
                 ->where($fk['column'], $fromUserId)
                 ->update([$fk['column'] => $toUserId]);
+        }
+    }
+
+    /**
+     * assign_cours has UNIQUE(course_id, user_id) — drop rows the keeper already has.
+     */
+    private static function mergeAssignCours(int $fromUserId, int $toUserId): void
+    {
+        if (!Schema::hasTable('assign_cours')) {
+            return;
+        }
+
+        $rows = DB::table('assign_cours')
+            ->where('user_id', $fromUserId)
+            ->get(['id', 'course_id']);
+
+        foreach ($rows as $row) {
+            $keeperAlreadyAssigned = DB::table('assign_cours')
+                ->where('course_id', $row->course_id)
+                ->where('user_id', $toUserId)
+                ->exists();
+
+            if ($keeperAlreadyAssigned) {
+                DB::table('assign_cours')->where('id', $row->id)->delete();
+
+                continue;
+            }
+
+            DB::table('assign_cours')
+                ->where('id', $row->id)
+                ->update(['user_id' => $toUserId]);
         }
     }
 }
