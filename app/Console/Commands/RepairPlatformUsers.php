@@ -44,14 +44,14 @@ class RepairPlatformUsers extends Command
             }
         }
 
+        $removed = PlatformUserService::dedupeDuplicateEmails();
+        $legacyRemoved = PlatformUserService::deleteLegacyEmails();
+        $this->info("Removed {$removed} duplicate user row(s) and {$legacyRemoved} legacy account(s).");
+
         $normalized = PlatformUserService::normalizeStoredEmails();
         if ($normalized > 0) {
             $this->info("Normalized {$normalized} stored email value(s).");
         }
-
-        $removed = PlatformUserService::dedupeDuplicateEmails();
-        $legacyRemoved = PlatformUserService::deleteLegacyEmails();
-        $this->info("Removed {$removed} duplicate user row(s) and {$legacyRemoved} legacy account(s).");
 
         try {
             PlatformUserService::ensureUniqueEmailIndex();

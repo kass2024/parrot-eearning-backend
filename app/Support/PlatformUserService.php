@@ -101,11 +101,24 @@ class PlatformUserService
             return 0;
         }
 
+        if (self::findNormalizedDuplicateGroups() !== []) {
+            return 0;
+        }
+
         $updated = 0;
 
         foreach (User::query()->get(['id', 'email']) as $user) {
             $normalized = self::normalizeEmail((string) $user->email);
             if ($normalized === '' || $normalized === (string) $user->email) {
+                continue;
+            }
+
+            $conflict = DB::table('users')
+                ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
+                ->where('id', '!=', $user->id)
+                ->exists();
+
+            if ($conflict) {
                 continue;
             }
 
@@ -125,32 +138,32 @@ class PlatformUserService
             return 0;
         }
 
-        self::normalizeStoredEmails();
-
         $removed = 0;
 
-        foreach (self::findNormalizedDuplicateGroups() as $group) {
-            $normalized = $group['normalized_email'];
+        while (self::findNormalizedDuplicateGroups() !== []) {
+            foreach (self::findNormalizedDuplicateGroups() as $group) {
+                $normalized = $group['normalized_email'];
 
-            $rows = DB::table('users')
-                ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
-                ->orderByDesc('updated_at')
-                ->orderByDesc('id')
-                ->get();
+                $rows = DB::table('users')
+                    ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
+                    ->orderByDesc('updated_at')
+                    ->orderByDesc('id')
+                    ->get();
 
-            $keeper = $rows->first();
-            if ($keeper === null) {
-                continue;
-            }
+                $keeper = $rows->first();
+                if ($keeper === null) {
+                    continue;
+                }
 
-            if ($keeper->email !== $normalized) {
-                DB::table('users')->where('id', $keeper->id)->update(['email' => $normalized]);
-            }
+                foreach ($rows->slice(1) as $duplicate) {
+                    self::reassignUserForeignKeys((int) $duplicate->id, (int) $keeper->id);
+                    DB::table('users')->where('id', $duplicate->id)->delete();
+                    $removed++;
+                }
 
-            foreach ($rows->slice(1) as $duplicate) {
-                self::reassignUserForeignKeys((int) $duplicate->id, (int) $keeper->id);
-                DB::table('users')->where('id', $duplicate->id)->delete();
-                $removed++;
+                if ((string) $keeper->email !== $normalized) {
+                    DB::table('users')->where('id', $keeper->id)->update(['email' => $normalized]);
+                }
             }
         }
 
