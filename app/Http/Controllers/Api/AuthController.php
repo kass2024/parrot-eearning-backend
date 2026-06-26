@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use App\Services\StudentRegistrationEmailService;
 use App\Support\PlatformUserService;
+use Illuminate\Database\QueryException;
 
 class AuthController extends Controller
 {
@@ -151,7 +152,7 @@ class AuthController extends Controller
         ]);
 
         $username = trim($data['username']);
-        $password = $data['password'];
+        $password = trim($data['password']);
         $normalizedEmail = PlatformUserService::normalizeEmail($username);
         $isEmailLogin = filter_var($normalizedEmail, FILTER_VALIDATE_EMAIL) !== false;
 
