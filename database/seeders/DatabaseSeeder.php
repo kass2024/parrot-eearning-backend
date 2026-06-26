@@ -42,9 +42,19 @@ class DatabaseSeeder extends Seeder
             ]
         );
 
-        // Seed learners into students table instead of users table
+        User::updateOrCreate(
+            ['email' => 'info@xanderglobalscholars.com'],
+            [
+                'name' => 'Xander Global Scholars',
+                'password' => bcrypt('12345678'),
+                'role' => 'admin',
+                'status' => 'Active',
+            ]
+        );
+
         $this->call([
-            StudentSeeder::class,
+            AvailableScheduleSeeder::class,
+            LearningHubDemoSeeder::class,
         ]);
     }
 }

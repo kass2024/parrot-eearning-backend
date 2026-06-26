@@ -11,6 +11,7 @@ class Student extends Model
     use HasFactory;
 
     protected $fillable = [
+        'name',
         'first_name',
         'last_name',
         'email',
@@ -20,6 +21,18 @@ class Student extends Model
         'country',
         'primary_goal',
     ];
+
+    protected static function booted(): void
+    {
+        static::saving(function (Student $student) {
+            $full = trim(($student->first_name ?? '') . ' ' . ($student->last_name ?? ''));
+            if ($full !== '') {
+                $student->attributes['name'] = $full;
+            } elseif (empty($student->attributes['name'])) {
+                $student->attributes['name'] = (string) ($student->email ?? '');
+            }
+        });
+    }
 
     protected $appends = [
         'name',

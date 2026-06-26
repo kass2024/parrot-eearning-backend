@@ -14,12 +14,25 @@ class Course extends Model
 
     protected $fillable = [
         'title',
+        'course_code',
         'description',
+        'general_information',
+        'important_information',
+        'guidelines',
+        'how_to_use',
+        'attendance_policy',
+        'assessment_policy',
         'price',
         'duration',
         'requirements',
         'image',
         'status',
+    ];
+
+    protected $casts = [
+        'guidelines' => 'array',
+        'how_to_use' => 'array',
+        'price' => 'float',
     ];
 
     public function instructors()

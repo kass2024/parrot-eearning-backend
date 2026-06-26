@@ -14,6 +14,7 @@ use App\Http\Controllers\Api\StudentDashboardController;
 use App\Http\Controllers\Api\LearnerExtrasController;
 use App\Http\Controllers\Api\MeetingRegistrationController;
 use App\Http\Controllers\Api\AvailableScheduleController;
+use App\Http\Controllers\Api\StudyShiftController;
 use App\Http\Controllers\Api\LiveZoomCohortController;
 use App\Http\Controllers\Api\PaymentController;
 use App\Http\Controllers\Api\AdminPayoutController;
@@ -22,6 +23,7 @@ use App\Http\Controllers\Api\SystemController;
 use App\Http\Controllers\Api\InstructorDashboardController;
 use App\Http\Controllers\Api\QuizController;
 use App\Http\Controllers\Api\LearnerDashboardController;
+use App\Http\Controllers\Api\StudyShiftChangeRequestController;
 use App\Http\Controllers\Api\CertificateController;
 use App\Services\ZoomService;
 
@@ -68,13 +70,22 @@ Route::prefix('admin')->group(function () {
 
     // Available Schedule (Time Slots)
     Route::get('available-schedules', [AvailableScheduleController::class, 'index']);
+    Route::put('available-schedules/calendar', [AvailableScheduleController::class, 'updateCalendar']);
+    Route::post('available-schedules/bulk', [AvailableScheduleController::class, 'bulkUpsert']);
     Route::post('available-schedules', [AvailableScheduleController::class, 'store']);
     Route::put('available-schedules/{availableSchedule}', [AvailableScheduleController::class, 'update']);
     Route::delete('available-schedules/{availableSchedule}', [AvailableScheduleController::class, 'destroy']);
 
+    // Study shifts (learner registration)
+    Route::get('study-shifts', [StudyShiftController::class, 'index']);
+    Route::post('study-shifts', [StudyShiftController::class, 'store']);
+    Route::put('study-shifts/{studyShift}', [StudyShiftController::class, 'update']);
+    Route::delete('study-shifts/{studyShift}', [StudyShiftController::class, 'destroy']);
+
     // Live Zoom Cohort (separate table)
     Route::get('livezoom-cohort', [LiveZoomCohortController::class, 'index']);
     Route::post('livezoom-cohort', [LiveZoomCohortController::class, 'store']);
+    Route::post('livezoom-cohort/bulk', [LiveZoomCohortController::class, 'bulkUpsert']);
     Route::put('livezoom-cohort/{liveZoomCohort}', [LiveZoomCohortController::class, 'update']);
     Route::delete('livezoom-cohort/{liveZoomCohort}', [LiveZoomCohortController::class, 'destroy']);
     Route::get('livezoom-cohort/{liveZoomCohort}/public', [LiveZoomCohortController::class, 'publicSession']);
@@ -158,6 +169,11 @@ Route::prefix('admin')->group(function () {
     Route::get('learner/dashboard', [LearnerDashboardController::class, 'dashboard']);
     Route::get('learner/notifications', [LearnerDashboardController::class, 'notifications']);
     Route::get('learner/recordings', [LearnerDashboardController::class, 'recordings']);
+    Route::post('learner/study-shift-change-requests', [StudyShiftChangeRequestController::class, 'store']);
+    Route::get('study-shift-change-requests', [StudyShiftChangeRequestController::class, 'index']);
+    Route::post('study-shift-change-requests/{studyShiftChangeRequest}/approve', [StudyShiftChangeRequestController::class, 'approve']);
+    Route::post('study-shift-change-requests/{studyShiftChangeRequest}/reject', [StudyShiftChangeRequestController::class, 'reject']);
+    Route::post('courses/{course}/enrollment-study-shifts', [StudyShiftChangeRequestController::class, 'updateEnrollmentShifts']);
     Route::post('learner/live-classes/{material}/sdk-auth', [ZoomEmbedController::class, 'learnerMaterialAuth']);
     Route::get('learner/courses/{course}/materials', [CourseMaterialController::class, 'learnerIndex']);
 
@@ -191,6 +207,8 @@ Route::prefix('admin')->group(function () {
     Route::get('learner/quizzes/{quiz}', [QuizController::class, 'showForLearner']);
     Route::post('learner/quizzes/{quiz}/submit', [QuizController::class, 'submit']);
     Route::post('instructor/courses', [InstructorDashboardController::class, 'createCourse']);
+    Route::put('instructor/courses/{course}', [InstructorDashboardController::class, 'updateCourse']);
+    Route::get('instructor/payout-payment-options', [InstructorDashboardController::class, 'payoutPaymentOptions']);
     Route::get('instructor/payout-requests', [InstructorDashboardController::class, 'payoutRequests']);
     Route::post('instructor/payout-requests', [InstructorDashboardController::class, 'requestPayout']);
 
@@ -230,6 +248,7 @@ Route::prefix('admin')->group(function () {
     Route::post('instructor-payouts/{payout}/reject', [AdminPayoutController::class, 'reject']);
 
     /*** ---------------- COURSES ---------------- ***/
+    Route::get('courses/suggest-code', [CourseController::class, 'suggestCode']);
     Route::get('courses', [CourseController::class, 'index']);
     Route::post('courses', [CourseController::class, 'store']);
     Route::put('courses/{course}', [CourseController::class, 'update']);
@@ -241,6 +260,8 @@ Route::prefix('admin')->group(function () {
     Route::post('courses/{course}/schedule-class', [CourseController::class, 'scheduleClass']);
     Route::post('courses/{course}/mark-paid', [CourseController::class, 'markPaid']);
     Route::post('courses/{course}/reject-enrollment', [CourseController::class, 'rejectEnrollment']);
+    Route::post('courses/{course}/remove-enrollment', [CourseController::class, 'removeEnrollment']);
+    Route::post('courses/{course}/send-payment-link', [CourseController::class, 'sendPaymentLink']);
     Route::get('courses/{course}/enrolled-students', [CourseController::class, 'enrolledStudents']);
 
     // Course materials

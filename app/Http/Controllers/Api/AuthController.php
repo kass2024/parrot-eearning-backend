@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use App\Services\StudentRegistrationEmailService;
+use Illuminate\Database\QueryException;
 
 class AuthController extends Controller
 {
@@ -183,10 +184,15 @@ class AuthController extends Controller
         };
 
         // Try Students table first (treated as learners)
-        $student = Student::where('email', $username)
-            ->orWhere('first_name', $username)
-            ->orWhere('last_name', $username)
-            ->first();
+        try {
+            $student = Student::where('email', $username)
+                ->orWhere('first_name', $username)
+                ->orWhere('last_name', $username)
+                ->first();
+        } catch (QueryException $e) {
+            $student = null;
+        }
+
         if ($student && $verify($student)) {
             $studentStatus = strtolower(trim((string) ($student->status ?? 'active')));
             if (in_array($studentStatus, ['pending', 'inactive', 'rejected'], true)) {
@@ -203,7 +209,14 @@ class AuthController extends Controller
         }
 
         // Users table (admin, staff, instructors, etc.)
-        $user = User::where('email', $username)->orWhere('name', $username)->first();
+        try {
+            $user = User::where('email', $username)->orWhere('name', $username)->first();
+        } catch (QueryException $e) {
+            return response()->json([
+                'message' => 'Database schema error. Run: php artisan schema:rebuild-corrupted --seed --force',
+            ], 503);
+        }
+
         if ($user && $verify($user)) {
             $userStatus = strtolower(trim((string) ($user->status ?? 'active')));
             $userRole = strtolower(trim((string) ($user->role ?? 'admin')));

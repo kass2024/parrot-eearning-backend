@@ -27,7 +27,11 @@ class AppServiceProvider extends ServiceProvider
             }
         }
 
-        if (!config('app.auto_migrate') || $this->app->runningInConsole()) {
+        if (!config('app.auto_migrate')) {
+            return;
+        }
+
+        if ($this->app->runningInConsole() && !DatabaseSchemaService::shouldAutoMigrateCli()) {
             return;
         }
 
@@ -39,9 +43,8 @@ class AppServiceProvider extends ServiceProvider
                 return;
             }
 
-            if (count($schema->pendingMigrations()) > 0 || !$schema->schemaReady()) {
-                $schema->runMigrations();
-            }
+            $schema->ensureMigrated();
+            $schema->ensureDemoData();
         } catch (\Throwable $e) {
             Log::warning('AUTO_MIGRATE skipped', ['error' => $e->getMessage()]);
         }

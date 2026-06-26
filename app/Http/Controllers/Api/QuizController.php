@@ -493,7 +493,7 @@ class QuizController extends Controller
         $enrolled = CourseEnrollment::query()
             ->where('student_id', $student->id)
             ->where('course_id', $quiz->course_id)
-            ->whereIn('status', ['paid', 'completed', 'active', 'approved', 'enrolled'])
+            ->whereIn('status', \App\Support\EnrollmentStatusHelper::accessStatuses())
             ->exists();
 
         if (!$enrolled) {
@@ -593,7 +593,7 @@ class QuizController extends Controller
         $enrolled = CourseEnrollment::query()
             ->where('student_id', $student->id)
             ->where('course_id', $quiz->course_id)
-            ->whereIn('status', ['paid', 'completed', 'active', 'approved', 'enrolled'])
+            ->whereIn('status', \App\Support\EnrollmentStatusHelper::accessStatuses())
             ->exists();
 
         if (!$enrolled) {

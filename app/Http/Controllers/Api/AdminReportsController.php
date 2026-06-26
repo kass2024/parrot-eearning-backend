@@ -44,13 +44,26 @@ class AdminReportsController extends Controller
         ])->values();
 
         $revenueByMonth = CourseRevenueCalculator::revenueByMonth(5);
+        $sharePercent = (float) config('app.instructor_share_percent', 70);
+        $platformSharePercent = round(100 - $sharePercent, 2);
+
+        $revenueByMonthSplit = $revenueByMonth->map(function (array $row) use ($sharePercent, $platformSharePercent) {
+            $total = (float) ($row['amount'] ?? 0);
+
+            return [
+                'month' => $row['month'],
+                'amount' => $total,
+                'instructor_earnings' => round($total * ($sharePercent / 100), 2),
+                'platform_earnings' => round($total * ($platformSharePercent / 100), 2),
+            ];
+        })->values();
 
         $instructorPerformance = User::query()
             ->where('role', 'instructor')
             ->withCount('assignedCourses')
             ->orderByDesc('id')
             ->get()
-            ->map(function (User $instructor) {
+            ->map(function (User $instructor) use ($sharePercent, $platformSharePercent) {
                 $courseIds = $instructor->assignedCourses()->pluck('courses.id');
                 $students = $courseIds->isEmpty()
                     ? 0
@@ -58,6 +71,21 @@ class AdminReportsController extends Controller
                 $enrollments = $courseIds->isEmpty()
                     ? 0
                     : CourseEnrollment::whereIn('course_id', $courseIds)->count();
+
+                $totalRevenue = $courseIds->isEmpty()
+                    ? 0.0
+                    : CourseRevenueCalculator::paymentRevenue($courseIds->all());
+                $instructorEarnings = round($totalRevenue * ($sharePercent / 100), 2);
+                $platformEarnings = round($totalRevenue * ($platformSharePercent / 100), 2);
+
+                $paidOut = (float) InstructorPayoutRequest::query()
+                    ->where('instructor_id', $instructor->id)
+                    ->whereIn('status', ['approved', 'paid', 'completed'])
+                    ->sum('amount');
+                $pendingPayout = (float) InstructorPayoutRequest::query()
+                    ->where('instructor_id', $instructor->id)
+                    ->whereIn('status', ['pending', 'processing'])
+                    ->sum('amount');
 
                 return [
                     'id' => $instructor->id,
@@ -67,18 +95,28 @@ class AdminReportsController extends Controller
                     'courses_assigned' => $instructor->assigned_courses_count,
                     'total_enrollments' => $enrollments,
                     'unique_students' => $students,
+                    'total_revenue' => round($totalRevenue, 2),
+                    'instructor_earnings' => $instructorEarnings,
+                    'platform_earnings' => $platformEarnings,
+                    'paid_out' => round($paidOut, 2),
+                    'pending_payout' => round($pendingPayout, 2),
+                    'available_balance' => max(0, round($instructorEarnings - $paidOut - $pendingPayout, 2)),
                 ];
             })
             ->values();
 
         $coursePerformance = Course::query()
+            ->with(['instructors:id,name,email'])
             ->withCount([
                 'enrollments as total_enrollments',
                 'enrollments as paid_enrollments' => fn ($q) => $q->where('status', 'paid'),
             ])
             ->orderByDesc('total_enrollments')
             ->get()
-            ->map(function (Course $course) {
+            ->map(function (Course $course) use ($sharePercent, $platformSharePercent) {
+                $revenue = CourseRevenueCalculator::courseRevenue($course);
+                $instructorNames = $course->instructors->pluck('name')->filter()->values()->all();
+
                 return [
                     'id' => $course->id,
                     'title' => $course->title,
@@ -86,7 +124,11 @@ class AdminReportsController extends Controller
                     'price' => (float) ($course->price ?? 0),
                     'total_enrollments' => (int) $course->total_enrollments,
                     'paid_enrollments' => (int) $course->paid_enrollments,
-                    'revenue' => CourseRevenueCalculator::courseRevenue($course),
+                    'revenue' => $revenue,
+                    'instructor_earnings' => round($revenue * ($sharePercent / 100), 2),
+                    'platform_earnings' => round($revenue * ($platformSharePercent / 100), 2),
+                    'instructor_names' => $instructorNames,
+                    'instructor_label' => $instructorNames ? implode(', ', $instructorNames) : 'Unassigned',
                 ];
             })
             ->values();
@@ -105,6 +147,8 @@ class AdminReportsController extends Controller
 
         $stripeRevenue = CourseRevenueCalculator::paymentRevenue();
         $manualRevenue = CourseRevenueCalculator::manualEnrollmentRevenue();
+        $instructorEarningsTotal = round($stripeRevenue * ($sharePercent / 100), 2);
+        $platformEarningsTotal = round($stripeRevenue * ($platformSharePercent / 100), 2);
 
         $pendingInstructors = User::query()
             ->where('role', 'instructor')
@@ -145,6 +189,10 @@ class AdminReportsController extends Controller
                 'totalRevenue' => round($stripeRevenue, 2),
                 'stripeRevenue' => round($stripeRevenue, 2),
                 'manualRevenue' => round($manualRevenue, 2),
+                'instructorEarnings' => $instructorEarningsTotal,
+                'platformEarnings' => $platformEarningsTotal,
+                'instructorSharePercent' => $sharePercent,
+                'platformSharePercent' => $platformSharePercent,
                 'pendingInstructors' => $pendingInstructors,
                 'pendingCourses' => $pendingCourses,
                 'pendingPayments' => $pendingPayments,
@@ -154,6 +202,7 @@ class AdminReportsController extends Controller
             ],
             'enrollmentsByMonth' => $enrollmentsByMonth,
             'revenueByMonth' => $revenueByMonth,
+            'revenueByMonthSplit' => $revenueByMonthSplit,
             'instructorPerformance' => $instructorPerformance,
             'coursePerformance' => $coursePerformance,
             'studentsByCountry' => $studentsByCountry,

@@ -14,6 +14,7 @@ use App\Services\ZoomService;
 use App\Support\LiveZoomCohortHelper;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
+use Carbon\Carbon;
 use Illuminate\Validation\ValidationException;
 
 class LiveZoomCohortController extends Controller
@@ -28,19 +29,104 @@ class LiveZoomCohortController extends Controller
 
     public function index()
     {
-        return response()->json(
-            LiveZoomCohort::query()
-                ->orderBy('day_of_week')
-                ->orderBy('start_time')
-                ->get(),
-            200
-        );
+        $query = LiveZoomCohort::query();
+
+        if (Schema::hasColumn('livezoom_cohort', 'available_on_date')) {
+            $query->orderByRaw('available_on_date IS NULL')
+                ->orderBy('available_on_date')
+                ->orderBy('start_time');
+        } else {
+            $query->orderBy('day_of_week')->orderBy('start_time');
+        }
+
+        return response()->json($query->get(), 200);
+    }
+
+    private function syncDayOfWeek(array $data): array
+    {
+        if (!empty($data['available_on_date'])) {
+            try {
+                $data['day_of_week'] = Carbon::parse($data['available_on_date'])->dayOfWeek;
+            } catch (\Throwable $e) {
+                // keep provided day_of_week
+            }
+        }
+
+        return $data;
+    }
+
+    public function bulkUpsert(Request $request)
+    {
+        $data = $request->validate([
+            'dates' => 'required|array|min:1|max:400',
+            'dates.*' => 'date_format:Y-m-d',
+            'start_time' => 'required|date_format:H:i',
+            'end_time' => 'required|date_format:H:i|after:start_time',
+            'timezone' => 'nullable|string|max:100',
+            'is_active' => 'nullable|boolean',
+            'notes' => 'nullable|string|max:2000',
+        ]);
+
+        if (!Schema::hasColumn('livezoom_cohort', 'available_on_date')) {
+            return response()->json([
+                'message' => 'Run database migrations to enable calendar scheduling for live cohorts.',
+            ], 422);
+        }
+
+        $timezone = $data['timezone'] ?? 'Africa/Kigali';
+        $isActive = array_key_exists('is_active', $data) ? (bool) $data['is_active'] : true;
+        $notes = $data['notes'] ?? null;
+        $userId = $request->user()?->id;
+
+        $created = 0;
+        $updated = 0;
+
+        foreach (array_values(array_unique($data['dates'])) as $date) {
+            $payload = $this->syncDayOfWeek([
+                'available_on_date' => $date,
+                'start_time' => $data['start_time'],
+                'end_time' => $data['end_time'],
+                'timezone' => $timezone,
+                'is_active' => $isActive,
+                'notes' => $notes,
+            ]);
+
+            if (Schema::hasColumn('livezoom_cohort', 'session_status')) {
+                $payload['session_status'] = 'idle';
+            }
+
+            $existing = LiveZoomCohort::query()
+                ->where('available_on_date', $date)
+                ->first();
+
+            if ($existing) {
+                $existing->fill($payload);
+                if ($userId) {
+                    $existing->created_by = $userId;
+                }
+                $existing->save();
+                $updated++;
+            } else {
+                if ($userId) {
+                    $payload['created_by'] = $userId;
+                }
+                LiveZoomCohort::create($payload);
+                $created++;
+            }
+        }
+
+        return response()->json([
+            'message' => 'Live cohort schedule saved for '.count($data['dates']).' date(s)',
+            'created' => $created,
+            'updated' => $updated,
+        ], 200);
     }
 
     public function store(Request $request)
     {
         $data = $request->validate([
-            'day_of_week' => 'required|integer|min:0|max:6',
+            'day_of_week' => 'nullable|integer|min:0|max:6',
+            'available_on_date' => 'nullable|date_format:Y-m-d',
             'start_time' => 'required|date_format:H:i',
             'end_time' => 'required|date_format:H:i|after:start_time',
             'timezone' => 'nullable|string|max:100',
@@ -48,6 +134,14 @@ class LiveZoomCohortController extends Controller
             'notes' => 'nullable|string|max:2000',
             'zoom_link' => 'nullable|url|max:2048',
         ]);
+
+        if (empty($data['day_of_week']) && empty($data['available_on_date'])) {
+            throw ValidationException::withMessages([
+                'available_on_date' => 'Either day_of_week or available_on_date is required.',
+            ]);
+        }
+
+        $data = $this->syncDayOfWeek($data);
 
         $data['timezone'] = $data['timezone'] ?? 'Africa/Kigali';
         $data['is_active'] = array_key_exists('is_active', $data) ? (bool) $data['is_active'] : true;
@@ -70,7 +164,8 @@ class LiveZoomCohortController extends Controller
     public function update(Request $request, LiveZoomCohort $liveZoomCohort)
     {
         $data = $request->validate([
-            'day_of_week' => 'sometimes|required|integer|min:0|max:6',
+            'day_of_week' => 'sometimes|nullable|integer|min:0|max:6',
+            'available_on_date' => 'sometimes|nullable|date_format:Y-m-d',
             'start_time' => 'sometimes|required|date_format:H:i',
             'end_time' => 'sometimes|required|date_format:H:i',
             'timezone' => 'nullable|string|max:100',
@@ -78,6 +173,8 @@ class LiveZoomCohortController extends Controller
             'notes' => 'nullable|string|max:2000',
             'zoom_link' => 'nullable|url|max:2048',
         ]);
+
+        $data = $this->syncDayOfWeek($data);
 
         if (array_key_exists('start_time', $data) && array_key_exists('end_time', $data)) {
             if ($data['end_time'] <= $data['start_time']) {
