@@ -8,13 +8,14 @@ use App\Models\Student;
 use App\Models\StudyShift;
 use App\Models\User;
 use App\Support\ApiListCache;
+use App\Support\PlatformUserService;
 use Illuminate\Database\Seeder;
 
 class LearningHubDemoSeeder extends Seeder
 {
     public function run(): void
     {
-        $demoPassword = bcrypt((string) config('platform.seed_password'));
+        $demoPassword = (string) config('platform.seed_password');
 
         $instructor = User::updateOrCreate(
             ['email' => 'instructor@parrotglobalstudyacademy.ca'],

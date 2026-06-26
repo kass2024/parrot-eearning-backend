@@ -12,30 +12,17 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use App\Services\StudentRegistrationEmailService;
-use Illuminate\Database\QueryException;
+use App\Support\PlatformUserService;
 
 class AuthController extends Controller
 {
     private function verifyPlainOrHashedPassword($record, string $password): bool
     {
-        if (!$record) {
+        if (!$record instanceof \Illuminate\Database\Eloquent\Model) {
             return false;
         }
 
-        $stored = (string) ($record->password ?? '');
-        $defaultPassword = '12345678';
-
-        // If no password set in DB, allow default only
-        if (empty($stored)) {
-            return $password === $defaultPassword;
-        }
-
-        // If hashed (bcrypt), attempt hash check; otherwise compare plain
-        if (password_get_info($stored)['algo'] !== 0) {
-            return password_verify($password, $stored);
-        }
-
-        return hash_equals($stored, $password);
+        return PlatformUserService::verifyPassword($record, $password);
     }
 
     private function resolveAccountByRole(string $role, string $email)
@@ -163,61 +150,36 @@ class AuthController extends Controller
             'password' => 'required|string',
         ]);
 
-        $username = $data['username'];
+        $username = trim($data['username']);
         $password = $data['password'];
+        $normalizedEmail = PlatformUserService::normalizeEmail($username);
+        $isEmailLogin = filter_var($normalizedEmail, FILTER_VALIDATE_EMAIL) !== false;
 
-        $defaultPassword = '12345678';
-
-        // helper to verify: if password column is empty => accept default; else verify against stored password
-        $verify = function ($record) use ($password, $defaultPassword) {
-            if (!$record) return false;
-            $stored = $record->password ?? '';
-            // If no password set in DB, allow default only
-            if (empty($stored)) {
-                return $password === $defaultPassword;
-            }
-            // If hashed (bcrypt), attempt hash check; otherwise compare plain
-            if (password_get_info($stored)['algo'] !== 0) {
-                return password_verify($password, $stored);
-            }
-            return $stored === $password;
-        };
-
-        // Try Students table first (treated as learners)
+        // Platform staff (admin / instructor / staff) — check before students so duplicate emails do not block dashboard login.
         try {
-            $student = Student::where('email', $username)
-                ->orWhere('first_name', $username)
-                ->orWhere('last_name', $username)
-                ->first();
-        } catch (QueryException $e) {
-            $student = null;
-        }
-
-        if ($student && $verify($student)) {
-            $studentStatus = strtolower(trim((string) ($student->status ?? 'active')));
-            if (in_array($studentStatus, ['pending', 'inactive', 'rejected'], true)) {
-                return response()->json([
-                    'message' => 'Your account is pending admin approval. You will be able to sign in once an administrator approves your registration.',
-                ], 403);
-            }
-
-            return response()->json([
-                'message' => 'Login successful',
-                'role' => 'learner',
-                'user' => $student,
-            ]);
-        }
-
-        // Users table (admin, staff, instructors, etc.)
-        try {
-            $user = User::where('email', $username)->orWhere('name', $username)->first();
+            $userCandidates = User::query()
+                ->when($isEmailLogin, function ($query) use ($normalizedEmail, $username) {
+                    $query->where(function ($inner) use ($normalizedEmail, $username) {
+                        $inner->whereRaw('LOWER(TRIM(email)) = ?', [$normalizedEmail])
+                            ->orWhere('name', $username);
+                    });
+                }, function ($query) use ($username) {
+                    $query->where('name', $username);
+                })
+                ->orderByDesc('updated_at')
+                ->orderByDesc('id')
+                ->get();
         } catch (QueryException $e) {
             return response()->json([
                 'message' => 'Database schema error. Run: php artisan schema:rebuild-corrupted --seed --force',
             ], 503);
         }
 
-        if ($user && $verify($user)) {
+        foreach ($userCandidates as $user) {
+            if (!$this->verifyPlainOrHashedPassword($user, $password)) {
+                continue;
+            }
+
             $userStatus = strtolower(trim((string) ($user->status ?? 'active')));
             $userRole = strtolower(trim((string) ($user->role ?? 'admin')));
 
@@ -241,12 +203,59 @@ class AuthController extends Controller
         }
 
         // Legacy agents table (instructors)
-        $agent = Agent::where('email', $username)->orWhere('name', $username)->first();
-        if ($agent && $verify($agent)) {
+        $agentCandidates = Agent::query()
+            ->when($isEmailLogin, function ($query) use ($normalizedEmail, $username) {
+                $query->where(function ($inner) use ($normalizedEmail, $username) {
+                    $inner->whereRaw('LOWER(TRIM(email)) = ?', [$normalizedEmail])
+                        ->orWhere('name', $username);
+                });
+            }, function ($query) use ($username) {
+                $query->where('name', $username);
+            })
+            ->orderByDesc('id')
+            ->get();
+
+        foreach ($agentCandidates as $agent) {
+            if ($this->verifyPlainOrHashedPassword($agent, $password)) {
+                return response()->json([
+                    'message' => 'Login successful',
+                    'role' => 'instructor',
+                    'user' => $agent,
+                ]);
+            }
+        }
+
+        // Learners (students table)
+        try {
+            $studentCandidates = Student::query()
+                ->when($isEmailLogin, function ($query) use ($normalizedEmail) {
+                    $query->whereRaw('LOWER(TRIM(email)) = ?', [$normalizedEmail]);
+                }, function ($query) use ($username) {
+                    $query->where('first_name', $username)
+                        ->orWhere('last_name', $username);
+                })
+                ->orderByDesc('id')
+                ->get();
+        } catch (QueryException $e) {
+            $studentCandidates = collect();
+        }
+
+        foreach ($studentCandidates as $student) {
+            if (!$this->verifyPlainOrHashedPassword($student, $password)) {
+                continue;
+            }
+
+            $studentStatus = strtolower(trim((string) ($student->status ?? 'active')));
+            if (in_array($studentStatus, ['pending', 'inactive', 'rejected'], true)) {
+                return response()->json([
+                    'message' => 'Your account is pending admin approval. You will be able to sign in once an administrator approves your registration.',
+                ], 403);
+            }
+
             return response()->json([
                 'message' => 'Login successful',
-                'role' => 'instructor',
-                'user' => $agent,
+                'role' => 'learner',
+                'user' => $student,
             ]);
         }
 
