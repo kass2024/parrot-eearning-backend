@@ -38,9 +38,33 @@ class PlatformUserService
         return strtolower(trim($email));
     }
 
+    /** @var array<string, string> Legacy logins → current platform email */
+    public const LOGIN_EMAIL_ALIASES = [
+        'info@xanderglobalscholars.com' => 'infos@parrotglobalstudyacademy.ca',
+        'admission@xanderglobalscholars.com' => 'infos@parrotglobalstudyacademy.ca',
+        'admin@parrot.com' => 'infos@parrotglobalstudyacademy.ca',
+    ];
+
+    public static function defaultPassword(): string
+    {
+        return self::seedPassword();
+    }
+
+    public static function adminEmail(): string
+    {
+        return (string) config('platform.admin_email', 'infos@parrotglobalstudyacademy.ca');
+    }
+
+    public static function resolveLoginEmail(string $email): string
+    {
+        $normalized = self::normalizeEmail($email);
+
+        return self::LOGIN_EMAIL_ALIASES[$normalized] ?? $normalized;
+    }
+
     public static function seedPassword(): string
     {
-        $value = (string) config('platform.seed_password');
+        $value = (string) config('platform.seed_password', config('platform.default_password', 'Parrot@2025'));
 
         return trim($value, " \t\n\r\0\x0B'\"");
     }

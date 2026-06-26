@@ -153,7 +153,7 @@ class AuthController extends Controller
 
         $username = trim($data['username']);
         $password = trim($data['password']);
-        $normalizedEmail = PlatformUserService::normalizeEmail($username);
+        $normalizedEmail = PlatformUserService::resolveLoginEmail($username);
         $isEmailLogin = filter_var($normalizedEmail, FILTER_VALIDATE_EMAIL) !== false;
 
         // Platform staff (admin / instructor / staff) — check before students so duplicate emails do not block dashboard login.
