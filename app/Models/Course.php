@@ -7,12 +7,14 @@ use Illuminate\Database\Eloquent\Model;
 use App\Models\User;
 use App\Models\CourseMaterial;
 use App\Models\CourseEnrollment;
+use App\Models\ElearningProgram;
 
 class Course extends Model
 {
     use HasFactory;
 
     protected $fillable = [
+        'program_id',
         'title',
         'course_code',
         'description',
@@ -34,6 +36,11 @@ class Course extends Model
         'how_to_use' => 'array',
         'price' => 'float',
     ];
+
+    public function program()
+    {
+        return $this->belongsTo(ElearningProgram::class, 'program_id');
+    }
 
     public function instructors()
     {

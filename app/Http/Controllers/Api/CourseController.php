@@ -39,10 +39,20 @@ class CourseController extends Controller
         $this->zoom = $zoom;
         $this->mail = $mail;
     }
-    public function index()
+    public function index(Request $request)
     {
-        $courses = ApiListCache::remember('courses', 'all', 120, function () {
-            return Course::orderByDesc('id')->get();
+        $programId = $request->query('program_id');
+        $cacheKey = $programId ? 'program_' . $programId : 'all';
+
+        $courses = ApiListCache::remember('courses', $cacheKey, 120, function () use ($programId) {
+            $query = Course::with('program:id,name')
+                ->orderByDesc('id');
+
+            if ($programId) {
+                $query->where('program_id', $programId);
+            }
+
+            return $query->get();
         });
 
         return response()->json($courses, 200);
@@ -62,6 +72,7 @@ class CourseController extends Controller
     public function store(Request $request)
     {
         $data = $request->validate(array_merge([
+            'program_id' => 'required|integer|exists:elearning_programs,id',
             'title' => 'required|string|max:255',
             'description' => 'nullable|string',
             'price' => 'nullable|numeric',
@@ -75,6 +86,7 @@ class CourseController extends Controller
         $details = CourseDetailsHelper::extractFromRequest($request);
 
         $payload = [
+            'program_id' => $data['program_id'],
             'title' => $data['title'],
             'description' => $data['description'] ?? null,
             'price' => $data['price'] ?? null,
@@ -111,6 +123,7 @@ class CourseController extends Controller
     public function update(Request $request, Course $course)
     {
         $data = $request->validate(array_merge([
+            'program_id' => 'sometimes|required|integer|exists:elearning_programs,id',
             'title' => 'sometimes|required|string|max:255',
             'description' => 'nullable|string',
             'price' => 'nullable|numeric',
@@ -190,6 +203,7 @@ class CourseController extends Controller
     protected function bumpCourseCaches(): void
     {
         ApiListCache::bump('courses');
+        ApiListCache::bump('elearning_programs');
         ApiListCache::bump('instructors');
         ApiListCache::bump('analytics');
     }

@@ -474,6 +474,7 @@ class LiveZoomCohortController extends Controller
                     'name' => $displayName,
                     'avatar_url' => $avatarUrl,
                 ],
+                'host' => $this->resolveMeetingHostBranding(),
                 'company' => [
                     'name' => (string) config('app.name', 'parrotglobalstudyacademy'),
                 ],
@@ -758,6 +759,23 @@ class LiveZoomCohortController extends Controller
     }
 
     /**
+     * Zoom host branding for participants (profile picture from Zoom account).
+     *
+     * @return array{name: string, email: string|null, avatar_url: string|null}
+     */
+    protected function resolveMeetingHostBranding(): array
+    {
+        $hostEmail = trim((string) config('services.zoom.host_user_id', ''));
+        $zoomHost = $this->zoomApi->resolveUserProfilePicture();
+
+        return [
+            'name' => (string) config('app.name', 'parrotglobalstudyacademy'),
+            'avatar_url' => $zoomHost,
+            'email' => str_contains($hostEmail, '@') ? $hostEmail : null,
+        ];
+    }
+
+    /**
      * Resolve host display name and branding for the in-app host studio.
      *
      * @return array{name: string, email: string|null, avatar_url: string|null, company_name: string}
@@ -782,6 +800,10 @@ class LiveZoomCohortController extends Controller
         $avatarUrl = null;
         if ($user && !empty($user->avatar)) {
             $avatarUrl = (string) $user->avatar;
+        }
+        if ($avatarUrl === null || trim($avatarUrl) === '') {
+            $avatarUrl = $this->zoomApi->resolveUserProfilePicture($user?->email ?: ($hostEmail !== '' ? $hostEmail : null))
+                ?? $this->zoomApi->resolveUserProfilePicture();
         }
 
         return [

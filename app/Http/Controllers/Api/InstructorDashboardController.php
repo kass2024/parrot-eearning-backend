@@ -515,6 +515,7 @@ class InstructorDashboardController extends Controller
     {
         $data = $request->validate(array_merge([
             'instructor_email' => 'required|email',
+            'program_id' => 'required|integer|exists:elearning_programs,id',
             'title' => 'required|string|max:255',
             'description' => 'nullable|string',
             'price' => 'nullable|numeric|min:0',
@@ -529,6 +530,7 @@ class InstructorDashboardController extends Controller
 
         $details = CourseDetailsHelper::extractFromRequest($request);
         $payload = [
+            'program_id' => $data['program_id'],
             'title' => $data['title'],
             'description' => $data['description'] ?? null,
             'price' => $data['price'] ?? 0,
@@ -552,6 +554,7 @@ class InstructorDashboardController extends Controller
     {
         $data = $request->validate(array_merge([
             'instructor_email' => 'required|email',
+            'program_id' => 'sometimes|required|integer|exists:elearning_programs,id',
             'title' => 'sometimes|required|string|max:255',
             'description' => 'nullable|string',
             'price' => 'nullable|numeric|min:0',
@@ -571,7 +574,7 @@ class InstructorDashboardController extends Controller
         $details = CourseDetailsHelper::extractFromRequest($request);
 
         $payload = [];
-        foreach (['title', 'description', 'price', 'duration', 'requirements'] as $field) {
+        foreach (['program_id', 'title', 'description', 'price', 'duration', 'requirements'] as $field) {
             if (array_key_exists($field, $data)) {
                 $payload[$field] = $data[$field];
             }

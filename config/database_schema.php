@@ -8,7 +8,8 @@
 return [
     'users' => ['id', 'name', 'email', 'password', 'role', 'status', 'phone'],
     'students' => ['id', 'email', 'first_name', 'last_name', 'status', 'password', 'country', 'phone', 'primary_goal'],
-    'courses' => ['id', 'title', 'status', 'price', 'course_code'],
+    'courses' => ['id', 'title', 'status', 'price', 'course_code', 'program_id'],
+    'elearning_programs' => ['id', 'name', 'status', 'sort_order'],
     'course_enrollments' => ['id', 'student_id', 'course_id', 'status', 'level', 'study_shift_id'],
     'course_payments' => ['id', 'course_id', 'student_id', 'amount_cents', 'status', 'provider'],
     'assign_cours' => ['user_id', 'course_id'],

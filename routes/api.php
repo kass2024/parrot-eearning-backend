@@ -1,5 +1,6 @@
 <?php
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\ElearningProgramController;
 use App\Http\Controllers\Api\ProgramManagementController;
 use App\Http\Controllers\Api\AgentController;
 use App\Http\Controllers\Api\ApplicationController;
@@ -109,6 +110,15 @@ Route::prefix('admin')->group(function () {
     Route::post('livezoom-cohort/{liveZoomCohort}/host/mark-in-meeting', [LiveZoomCohortController::class, 'markHostInMeeting']);
     Route::post('livezoom-cohort/{liveZoomCohort}/host/mark-left', [LiveZoomCohortController::class, 'markHostLeft']);
     Route::post('livezoom-cohort/{liveZoomCohort}/recording', [LiveZoomCohortController::class, 'toggleRecording']);
+
+    /*** ---------------- E-LEARNING PROGRAMS ---------------- ***/
+    Route::get('learning-programs', [ElearningProgramController::class, 'index']);
+    Route::post('learning-programs', [ElearningProgramController::class, 'store']);
+    Route::get('learning-programs/{elearningProgram}', [ElearningProgramController::class, 'show']);
+    Route::put('learning-programs/{elearningProgram}', [ElearningProgramController::class, 'update']);
+    Route::delete('learning-programs/{elearningProgram}', [ElearningProgramController::class, 'destroy']);
+    Route::post('learning-programs/{elearningProgram}/assign-courses', [ElearningProgramController::class, 'assignCourses']);
+    Route::post('learning-programs/auto-assign-courses', [ElearningProgramController::class, 'autoAssignCourses']);
 
     /*** ---------------- DESTINATIONS ---------------- ***/
     Route::get('destinations', [ProgramManagementController::class, 'getDestinations']);

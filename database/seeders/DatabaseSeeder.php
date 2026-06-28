@@ -21,39 +21,58 @@ class DatabaseSeeder extends Seeder
         PlatformUserService::dedupeDuplicateEmails();
         PlatformUserService::deleteLegacyEmails();
 
-        User::updateOrCreate(
-            ['email' => 'infos@parrotglobalstudyacademy.ca'],
-            [
-                'name' => 'Parrot Canada Visa Consultant',
-                'password' => $plainPassword,
-                'role' => 'admin',
-                'status' => 'Active',
-            ]
+        self::seedPlatformUser(
+            'infos@parrotglobalstudyacademy.ca',
+            'Parrot Canada Visa Consultant',
+            'admin',
+            $plainPassword
         );
 
-        User::updateOrCreate(
-            ['email' => 'instructor@parrotglobalstudyacademy.ca'],
-            [
-                'name' => 'Instructor User',
-                'password' => $plainPassword,
-                'role' => 'instructor',
-                'status' => 'Active',
-            ]
+        self::seedPlatformUser(
+            'instructor@parrotglobalstudyacademy.ca',
+            'Instructor User',
+            'instructor',
+            $plainPassword
         );
 
-        User::updateOrCreate(
-            ['email' => 'staff@parrotglobalstudyacademy.ca'],
-            [
-                'name' => 'Staff User',
-                'password' => $plainPassword,
-                'role' => 'staff',
-                'status' => 'Active',
-            ]
+        self::seedPlatformUser(
+            'staff@parrotglobalstudyacademy.ca',
+            'Staff User',
+            'staff',
+            $plainPassword
         );
 
         $this->call([
             AvailableScheduleSeeder::class,
             LearningHubDemoSeeder::class,
         ]);
+    }
+
+    private static function seedPlatformUser(
+        string $email,
+        string $name,
+        string $role,
+        string $plainPassword
+    ): void {
+        $user = User::query()->whereRaw('LOWER(TRIM(email)) = ?', [strtolower(trim($email))])->first();
+
+        if (!$user) {
+            User::create([
+                'email' => $email,
+                'name' => $name,
+                'password' => $plainPassword,
+                'role' => $role,
+                'status' => 'Active',
+            ]);
+
+            return;
+        }
+
+        $user->fill([
+            'name' => $name,
+            'role' => $role,
+            'status' => 'Active',
+        ]);
+        $user->save();
     }
 }
