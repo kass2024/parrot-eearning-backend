@@ -163,6 +163,36 @@ class CourseProgramAssignmentService
         return $fallback;
     }
 
+    /**
+     * Ensure the default "General" program exists and assign courses to it.
+     *
+     * @return array{program_id: int, assigned: int}
+     */
+    public function assignAllToGeneral(bool $force = false): array
+    {
+        $program = ElearningProgram::firstOrCreate(
+            ['name' => 'General'],
+            [
+                'description' => 'Default program for existing courses',
+                'status' => 'Active',
+                'sort_order' => 0,
+            ]
+        );
+
+        $query = Course::query();
+        if (!$force) {
+            $query->whereNull('program_id');
+        }
+
+        $assigned = $query->update(['program_id' => $program->id]);
+
+        if ($assigned > 0) {
+            $this->bumpCaches();
+        }
+
+        return ['program_id' => $program->id, 'assigned' => $assigned];
+    }
+
     private function bumpCaches(): void
     {
         ApiListCache::bump('courses');

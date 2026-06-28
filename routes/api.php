@@ -44,6 +44,7 @@ Route::prefix('admin')->group(function () {
     Route::get('system/health', [SystemController::class, 'health']);
     Route::get('system/pcloud', [SystemController::class, 'pcloudHealth']);
     Route::post('system/migrate', [SystemController::class, 'migrate']);
+    Route::post('system/setup-programs', [SystemController::class, 'setupPrograms']);
 
     // Auth
     Route::post('auth/login', [AuthController::class, 'login']);

@@ -8,23 +8,27 @@ return new class extends Migration
 {
     public function up(): void
     {
-        Schema::create('elearning_programs', function (Blueprint $table) {
-            $table->id();
-            $table->string('name');
-            $table->text('description')->nullable();
-            $table->string('image')->nullable();
-            $table->string('status')->default('Active');
-            $table->unsignedInteger('sort_order')->default(0);
-            $table->timestamps();
-        });
+        if (!Schema::hasTable('elearning_programs')) {
+            Schema::create('elearning_programs', function (Blueprint $table) {
+                $table->id();
+                $table->string('name');
+                $table->text('description')->nullable();
+                $table->string('image')->nullable();
+                $table->string('status')->default('Active');
+                $table->unsignedInteger('sort_order')->default(0);
+                $table->timestamps();
+            });
+        }
 
-        Schema::table('courses', function (Blueprint $table) {
-            $table->foreignId('program_id')
-                ->nullable()
-                ->after('id')
-                ->constrained('elearning_programs')
-                ->nullOnDelete();
-        });
+        if (!Schema::hasColumn('courses', 'program_id')) {
+            Schema::table('courses', function (Blueprint $table) {
+                $table->foreignId('program_id')
+                    ->nullable()
+                    ->after('id')
+                    ->constrained('elearning_programs')
+                    ->nullOnDelete();
+            });
+        }
     }
 
     public function down(): void
