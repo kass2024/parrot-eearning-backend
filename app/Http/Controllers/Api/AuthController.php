@@ -133,10 +133,13 @@ class AuthController extends Controller
 
             DB::commit();
 
+            $institution = PlatformInstitutionHelper::resolveForStudent($student);
+
             return response()->json([
                 'message' => 'Student registered',
                 'role' => 'learner',
                 'user' => $student,
+                'institution' => PlatformInstitutionHelper::institutionPayload($institution),
                 'email_sent' => $emailSent,
                 'pending_approval' => true,
                 'enrollments_created' => $enrollmentResult,

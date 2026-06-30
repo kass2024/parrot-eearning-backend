@@ -59,16 +59,14 @@ class PlatformInstitutionController extends Controller
         }
 
         $user = User::whereRaw('LOWER(email) = ?', [$email])->first();
-        if (!$user) {
-            return response()->json(['institution' => null, 'is_main_admin' => false]);
-        }
-
-        $institution = PlatformInstitutionHelper::resolveForUser($user);
+        $institution = PlatformInstitutionHelper::resolveForEmail($email);
 
         return response()->json([
             'institution' => PlatformInstitutionHelper::institutionPayload($institution),
-            'is_main_admin' => PlatformInstitutionHelper::isMainPlatformAdmin($user),
-            'role' => $user->role,
+            'is_main_admin' => $user
+                ? PlatformInstitutionHelper::isMainPlatformAdmin($user)
+                : false,
+            'role' => $user?->role,
         ]);
     }
 

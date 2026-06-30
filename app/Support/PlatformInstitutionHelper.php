@@ -56,6 +56,33 @@ class PlatformInstitutionHelper
         return PlatformInstitution::find($student->platform_institution_id);
     }
 
+    /**
+     * Resolve partner institution for any account email (learner, instructor, partner admin).
+     */
+    public static function resolveForEmail(string $email): ?PlatformInstitution
+    {
+        $normalized = strtolower(trim($email));
+        if ($normalized === '') {
+            return null;
+        }
+
+        $student = Student::query()
+            ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
+            ->first();
+        if ($student) {
+            return self::resolveForStudent($student);
+        }
+
+        $user = User::query()
+            ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
+            ->first();
+        if ($user) {
+            return self::resolveForUser($user);
+        }
+
+        return null;
+    }
+
     public static function institutionPayload(?PlatformInstitution $institution): ?array
     {
         return $institution?->toPublicArray();
