@@ -117,11 +117,16 @@ class CourseMaterialController extends Controller
                 ->values()
                 ->all();
 
-            $liveMeetingIds = app(ZoomService::class)->fetchLiveMeetingIds();
-            $recordingsByMeetingId = LearnerRecordingAccess::filterGroupedRecordings(
-                app(ZoomService::class)->recordingsGroupedByMeetingId(),
-                $courseMeetingIds
-            );
+            try {
+                $liveMeetingIds = app(ZoomService::class)->fetchLiveMeetingIds();
+                $recordingsByMeetingId = LearnerRecordingAccess::filterGroupedRecordings(
+                    app(ZoomService::class)->recordingsGroupedByMeetingId(),
+                    $courseMeetingIds
+                );
+            } catch (\Throwable) {
+                $liveMeetingIds = [];
+                $recordingsByMeetingId = [];
+            }
         }
 
         $latestAttemptsByQuiz = [];

@@ -7,6 +7,8 @@ use App\Models\LiveZoomCohort;
 use App\Models\WebinarSetting;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Http\Client\Response;
 
 class ZoomService
 {
@@ -243,6 +245,27 @@ class ZoomService
             ->baseUrl('https://api.zoom.us/v2');
     }
 
+    /**
+     * @param  array<string, mixed>  $query
+     */
+    protected function safeGet(mixed $client, string $path, array $query = []): ?Response
+    {
+        if (!$client) {
+            return null;
+        }
+
+        try {
+            return $client->get($path, $query);
+        } catch (\Throwable $e) {
+            Log::warning('Zoom API request failed', [
+                'path' => $path,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+    }
+
     public function listMeetings(string $userId = 'me'): ?array
     {
         $client = $this->client();
@@ -286,7 +309,15 @@ class ZoomService
                     $params['next_page_token'] = $nextPageToken;
                 }
 
-                $response = $client->get("/users/{$encodedUser}/recordings", $params);
+                $response = $this->safeGet($client, "/users/{$encodedUser}/recordings", $params);
+
+                if ($response === null) {
+                    return [
+                        'error' => true,
+                        'status' => 0,
+                        'body' => ['message' => 'Zoom API unreachable'],
+                    ];
+                }
 
                 if ($response->failed()) {
                     return [
@@ -349,7 +380,15 @@ class ZoomService
             return null;
         }
 
-        $response = $client->get("/meetings/{$encoded}/recordings");
+        $response = $this->safeGet($client, "/meetings/{$encoded}/recordings");
+
+        if ($response === null) {
+            return [
+                'error' => true,
+                'status' => 0,
+                'body' => ['message' => 'Zoom API unreachable'],
+            ];
+        }
 
         if ($response->status() === 404) {
             return null;
@@ -399,7 +438,15 @@ class ZoomService
                     $params['next_page_token'] = $nextPageToken;
                 }
 
-                $response = $client->get("/accounts/{$encodedAccount}/recordings", $params);
+                $response = $this->safeGet($client, "/accounts/{$encodedAccount}/recordings", $params);
+
+                if ($response === null) {
+                    return [
+                        'error' => true,
+                        'status' => 0,
+                        'body' => ['message' => 'Zoom API unreachable'],
+                    ];
+                }
 
                 if ($response->failed()) {
                     return [
@@ -1136,30 +1183,39 @@ class ZoomService
         $hostId = $userId === 'me' ? $this->resolveHostUserId() : $userId;
         $cacheKey = 'zoom_live_meeting_ids_' . $hostId;
 
-        return Cache::remember($cacheKey, 20, function () use ($hostId) {
-            $client = $this->client();
-            if (!$client) {
-                return [];
-            }
+        try {
+            return Cache::remember($cacheKey, 20, function () use ($hostId) {
+                $client = $this->client();
+                if (!$client) {
+                    return [];
+                }
 
-            $response = $client->get('/users/' . rawurlencode($hostId) . '/meetings', [
-                'type' => 'live',
-                'page_size' => 100,
+                $response = $this->safeGet($client, '/users/' . rawurlencode($hostId) . '/meetings', [
+                    'type' => 'live',
+                    'page_size' => 100,
+                ]);
+
+                if (!$response || $response->failed()) {
+                    return [];
+                }
+
+                $meetings = $response->json('meetings') ?? [];
+
+                return collect($meetings)
+                    ->pluck('id')
+                    ->filter()
+                    ->map(fn ($id) => (string) $id)
+                    ->values()
+                    ->all();
+            });
+        } catch (\Throwable $e) {
+            Log::warning('Zoom live meetings lookup failed', [
+                'host' => $hostId,
+                'error' => $e->getMessage(),
             ]);
 
-            if ($response->failed()) {
-                return [];
-            }
-
-            $meetings = $response->json('meetings') ?? [];
-
-            return collect($meetings)
-                ->pluck('id')
-                ->filter()
-                ->map(fn ($id) => (string) $id)
-                ->values()
-                ->all();
-        });
+            return [];
+        }
     }
 
     public function isMeetingLive(string $meetingId, string $userId = 'me'): bool
@@ -1632,7 +1688,16 @@ class ZoomService
             return $cached;
         }
 
-        $collected = $this->collectAllCloudRecordings($ids, $monthsBack, true);
+        try {
+            $collected = $this->collectAllCloudRecordings($ids, $monthsBack, true);
+        } catch (\Throwable $e) {
+            Log::warning('Zoom cloud recordings lookup failed', ['error' => $e->getMessage()]);
+            $collected = [
+                'meetings' => [],
+                'errors' => [$e->getMessage()],
+                'strategies' => [],
+            ];
+        }
         $collected['cached'] = false;
         Cache::put($cacheKey, $collected, now()->addMinutes(5));
 
