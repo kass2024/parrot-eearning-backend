@@ -15,7 +15,12 @@ use App\Services\StudentRegistrationEmailService;
 use App\Support\PlatformUserService;
 use App\Support\PlatformInstitutionHelper;
 use App\Models\PlatformInstitution;
+use App\Models\Course;
+use App\Models\CourseEnrollment;
+use App\Services\EnrollmentStudyShiftService;
+use App\Services\StudyShiftProvisioningService;
 use Illuminate\Database\QueryException;
+use Illuminate\Http\JsonResponse;
 
 class AuthController extends Controller
 {
@@ -63,13 +68,18 @@ class AuthController extends Controller
             'first_name' => 'required|string|max:255',
             'last_name' => 'nullable|string|max:255',
             'email' => 'required|email|unique:students,email',
-            'password' => 'required|string|min:6',
+            'password' => 'nullable|string|min:6',
             'country' => 'nullable|string|max:255',
             'phone' => 'nullable|string|max:255',
             'primary_goal' => 'nullable|string',
             'selected_courses' => 'nullable|array',
             'selected_courses.*' => 'nullable|string|max:255',
             'platform_institution_id' => 'nullable|integer|exists:platform_institutions,id',
+            'enrollments' => 'nullable|array',
+            'enrollments.*.course_id' => 'required|integer|exists:courses,id',
+            'enrollments.*.level' => 'nullable|string|max:255',
+            'enrollments.*.study_shift_ids' => 'nullable|array',
+            'enrollments.*.study_shift_ids.*' => 'integer|exists:study_shifts,id',
         ]);
 
         try {
@@ -83,14 +93,14 @@ class AuthController extends Controller
                 $student->name = $data['email'];
             }
             $student->email = $data['email'];
-            // Table columns: status, phone, country, primary_goal are NOT NULL with no default
-            // New learners start as Pending until approved in dashboard/students
             $student->status = 'Pending';
             $student->phone = $data['phone'] ?? '';
             $student->country = $data['country'] ?? '';
             $student->primary_goal = $data['primary_goal'] ?? '';
-            $plainPassword = $data['password'];
-            $student->password = Hash::make($plainPassword);
+            $plainPassword = !empty($data['password'])
+                ? (string) $data['password']
+                : Str::password(12, symbols: true);
+            $student->password = $plainPassword;
 
             $institutionId = $data['platform_institution_id'] ?? null;
             if ($institutionId) {
@@ -107,6 +117,13 @@ class AuthController extends Controller
 
             $student->save();
 
+            $enrollmentResult = $this->createSignupEnrollments($student, $data['enrollments'] ?? []);
+            if ($enrollmentResult instanceof JsonResponse) {
+                DB::rollBack();
+
+                return $enrollmentResult;
+            }
+
             $selectedCourses = $data['selected_courses'] ?? [];
             $emailSent = app(StudentRegistrationEmailService::class)->sendWelcomeEmail(
                 $student,
@@ -122,18 +139,85 @@ class AuthController extends Controller
                 'user' => $student,
                 'email_sent' => $emailSent,
                 'pending_approval' => true,
+                'enrollments_created' => $enrollmentResult,
             ], 201);
         } catch (\Throwable $e) {
             DB::rollBack();
 
             Log::error('Failed to register student or send email', [
                 'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
             ]);
 
             return response()->json([
                 'message' => 'Failed to create account due to a server error. Please try again later.',
             ], 500);
         }
+    }
+
+    /**
+     * @param  array<int, array{course_id: int, level?: string|null, study_shift_ids?: array<int, int>}>  $enrollments
+     * @return int|JsonResponse
+     */
+    private function createSignupEnrollments(Student $student, array $enrollments): int|JsonResponse
+    {
+        if ($enrollments === []) {
+            return 0;
+        }
+
+        $shiftService = app(EnrollmentStudyShiftService::class);
+        $provisioning = app(StudyShiftProvisioningService::class);
+        $created = 0;
+
+        foreach ($enrollments as $item) {
+            $course = Course::query()->find((int) $item['course_id']);
+            if (!$course) {
+                continue;
+            }
+
+            $exists = CourseEnrollment::query()
+                ->where('student_id', $student->id)
+                ->where('course_id', $course->id)
+                ->exists();
+            if ($exists) {
+                continue;
+            }
+
+            $shiftIds = array_values(array_unique(array_filter(
+                array_map('intval', $item['study_shift_ids'] ?? [])
+            )));
+
+            $requireShifts = $provisioning
+                ->shiftsForCourseRegistration($course, $course->platform_institution_id)
+                ->isNotEmpty();
+
+            $shiftsResult = $shiftService->resolveStudyShiftsForCourse(
+                $course,
+                $shiftIds,
+                null,
+                $requireShifts
+            );
+
+            if ($shiftsResult instanceof JsonResponse) {
+                return $shiftsResult;
+            }
+
+            $enrollment = CourseEnrollment::create([
+                'student_id' => $student->id,
+                'course_id' => $course->id,
+                'status' => 'enrolled',
+                'level' => $item['level'] ?? null,
+                'study_shift_id' => $shiftsResult !== [] ? $shiftsResult[0]->id : null,
+            ]);
+
+            if ($shiftsResult !== []) {
+                $enrollment->studyShifts()->sync(collect($shiftsResult)->pluck('id')->all());
+            }
+
+            $created++;
+        }
+
+        return $created;
     }
 
     public function registerInstructor(Request $request)
