@@ -11,6 +11,9 @@ use App\Models\Student;
 use App\Models\User;
 use App\Services\Quiz\QuizAnalyticsService;
 use App\Services\Quiz\QuizAntiCheatService;
+use App\Services\Quiz\QuizAnswerMatcher;
+use App\Services\Quiz\QuizMarkingGuideService;
+use App\Services\Quiz\QuizOptionSorter;
 use App\Services\Quiz\QuizPublishedNotificationService;
 use App\Services\QuizAiService;
 use App\Support\QuizMaterialHelper;
@@ -28,6 +31,7 @@ class QuizController extends Controller
         protected QuizAnalyticsService $analytics,
         protected PCloudService $pcloud,
         protected QuizPublishedNotificationService $publishNotifications,
+        protected QuizMarkingGuideService $markingGuide,
     ) {
     }
 
@@ -553,6 +557,11 @@ class QuizController extends Controller
             !$canRetake || $pendingReview || $latestAttempt->marked_at !== null
         );
 
+        $resultRows = [];
+        if ($viewResultsOnly && $latestAttempt) {
+            $resultRows = $this->enrichQuestionResults($meta, $latestAttempt->question_results ?? []);
+        }
+
         return response()->json([
             'quiz' => [
                 'id' => $quiz->id,
@@ -575,6 +584,7 @@ class QuizController extends Controller
             'delivered_question_ids' => $viewResultsOnly ? [] : $delivery['delivered_ids'],
             'latest_attempt' => $latestAttempt?->toLearnerSummary(),
             'attempts' => $attempts,
+            'question_results' => $resultRows,
         ]);
     }
 
@@ -657,6 +667,11 @@ class QuizController extends Controller
             $questions = $delivery['questions'];
             $deliveredIds = $delivery['delivered_ids'];
         }
+
+        $questions = array_map(
+            fn ($question) => is_array($question) ? QuizAnswerMatcher::normalizeQuestionAnswers($question) : $question,
+            $questions
+        );
 
         $timeLimit = QuizMaterialHelper::timeLimitMinutes($quiz);
         if ($timeLimit && !empty($data['started_at'])) {
@@ -831,6 +846,99 @@ class QuizController extends Controller
         ]);
     }
 
+    public function downloadMarkingGuide(Request $request, CourseMaterial $quiz, QuizAttempt $attempt)
+    {
+        if (!in_array($quiz->type, ['quiz', 'assessment'], true)) {
+            return response()->json(['message' => 'Not a quiz.'], 404);
+        }
+
+        if ((int) $attempt->course_material_id !== (int) $quiz->id) {
+            return response()->json(['message' => 'Attempt not found for this quiz.'], 404);
+        }
+
+        $data = $request->validate([
+            'student_id' => 'nullable|integer|exists:students,id',
+            'instructor_email' => 'nullable|email',
+            'admin_email' => 'nullable|email',
+        ]);
+
+        $audience = 'learner';
+        $allowed = false;
+
+        if (!empty($data['student_id'])) {
+            $studentId = (int) $data['student_id'];
+            $allowed = (int) $attempt->student_id === $studentId
+                && CourseEnrollment::query()
+                    ->where('student_id', $studentId)
+                    ->where('course_id', $quiz->course_id)
+                    ->whereIn('status', \App\Support\EnrollmentStatusHelper::accessStatuses())
+                    ->exists();
+            $audience = 'learner';
+        }
+
+        if (!$allowed && !empty($data['instructor_email'])) {
+            $instructor = User::query()
+                ->where('email', $data['instructor_email'])
+                ->where('role', 'instructor')
+                ->first();
+            $allowed = $instructor && $instructor->assignedCourses()->where('courses.id', $quiz->course_id)->exists();
+            $audience = 'instructor';
+        }
+
+        if (!$allowed && !empty($data['admin_email'])) {
+            $admin = User::query()->where('email', $data['admin_email'])->first();
+            $role = strtolower((string) ($admin->role ?? ''));
+            $allowed = $admin && in_array($role, ['admin', 'superadmin', 'staff'], true);
+            $audience = 'admin';
+        }
+
+        if (!$allowed) {
+            return response()->json(['message' => 'Access denied.'], 403);
+        }
+
+        $attempt->loadMissing('student');
+        $payload = $this->markingGuide->buildPayload($quiz, $attempt, $audience);
+        $html = $this->markingGuide->renderHtml($payload);
+        $filename = sprintf(
+            'marking-guide-quiz-%d-attempt-%d.html',
+            $quiz->id,
+            $attempt->id
+        );
+
+        return response($html, 200, [
+            'Content-Type' => 'text/html; charset=UTF-8',
+            'Content-Disposition' => 'attachment; filename="' . $filename . '"',
+        ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $meta
+     * @param  mixed  $results
+     * @return array<int, array<string, mixed>>
+     */
+    protected function enrichQuestionResults(array $meta, mixed $results): array
+    {
+        if (!is_array($results)) {
+            return [];
+        }
+
+        $questionsById = collect($meta['questions'] ?? [])->keyBy(fn ($q) => (string) ($q['id'] ?? ''));
+
+        return array_values(array_map(function ($row) use ($questionsById) {
+            if (!is_array($row)) {
+                return [];
+            }
+
+            $qid = (string) ($row['question_id'] ?? '');
+            $question = $questionsById->get($qid, []);
+
+            return array_merge($row, [
+                'question' => $question['question'] ?? $question['instruction'] ?? null,
+                'instruction' => $question['instruction'] ?? null,
+            ]);
+        }, $results));
+    }
+
     /**
      * @param  array<string, mixed>  $data
      * @param  array<int, int>  $publishedStudentIds
@@ -855,11 +963,14 @@ class QuizController extends Controller
             'time_limit_minutes' => array_key_exists('time_limit_minutes', $data) && $data['time_limit_minutes'] !== null
                 ? (int) $data['time_limit_minutes']
                 : null,
-            'questions' => $data['questions'],
+            'questions' => array_map(
+                fn ($question) => is_array($question) ? QuizAnswerMatcher::normalizeQuestionAnswers($question) : $question,
+                is_array($data['questions'] ?? null) ? $data['questions'] : []
+            ),
             'question_pool' => $this->resolveQuestionPool($data, $existingMeta),
             'anti_cheat' => array_merge([
                 'shuffle_questions' => true,
-                'shuffle_options' => true,
+                'shuffle_options' => false,
                 'deliver_count' => 0,
                 'max_attempts' => 0,
                 'detect_tab_switch' => true,
@@ -1163,10 +1274,21 @@ class QuizController extends Controller
         }
 
         $data = $request->validate($rules);
-        $data['questions'] = $this->mergeQuestionFields(
+        $data['questions'] = array_map(function ($question) {
+            if (!is_array($question)) {
+                return $question;
+            }
+            $question = QuizAnswerMatcher::normalizeQuestionAnswers($question);
+            $type = (string) ($question['type'] ?? '');
+            if (in_array($type, ['multiple_choice', 'multiple_response'], true) && !empty($question['options']) && is_array($question['options'])) {
+                $question['options'] = QuizOptionSorter::sort($question['options']);
+            }
+
+            return $question;
+        }, $this->mergeQuestionFields(
             $request->input('questions', []),
             $data['questions'] ?? []
-        );
+        ));
 
         return $data;
     }

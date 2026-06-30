@@ -9,6 +9,8 @@ use App\Services\Quiz\QuizMaterialAnalysisService;
 use App\Services\Quiz\QuizQuestionValidator;
 use App\Support\QuizMaterialHelper;
 use App\Support\MaterialLanguageHelper;
+use App\Services\Quiz\QuizAnswerMatcher;
+use App\Services\Quiz\QuizOptionSorter;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -356,7 +358,7 @@ class QuizAiService
             $points = (int) ($question['points'] ?? 1);
             $maxScore += $points;
             $type = (string) ($question['type'] ?? 'multiple_choice');
-            $studentAnswer = $answers[$qid] ?? '';
+            $studentAnswer = QuizAnswerMatcher::lookupAnswer($answers, $qid);
 
             if ($type === 'true_false') {
                 $results[] = $this->markExact($question, $studentAnswer, $points, $qid);
@@ -602,6 +604,10 @@ class QuizAiService
                 $q['options'] = ['True', 'False'];
             }
 
+            if (in_array($type, ['multiple_choice', 'multiple_response'], true) && isset($q['options']) && is_array($q['options'])) {
+                $q['options'] = QuizOptionSorter::sort($q['options']);
+            }
+
             if ($type === 'matching' && isset($q['pairs']) && is_array($q['pairs'])) {
                 $q['pairs'] = array_values(array_map(
                     fn ($p) => ['left' => (string) ($p['left'] ?? '')],
@@ -806,9 +812,9 @@ PROMPT;
 
     protected function markExact(array $question, mixed $studentAnswer, int $points, string $qid): array
     {
-        $correct = trim((string) ($question['correct_answer'] ?? ''));
-        $student = trim((string) $studentAnswer);
-        $isCorrect = $student !== '' && strcasecmp($student, $correct) === 0;
+        $correct = QuizAnswerMatcher::resolveCorrectText($question);
+        $student = QuizAnswerMatcher::normalize((string) $studentAnswer);
+        $isCorrect = QuizAnswerMatcher::matchesExact($question, $studentAnswer);
 
         return [
             'question_id' => $qid,
@@ -816,7 +822,7 @@ PROMPT;
             'correct' => $isCorrect,
             'score' => $isCorrect ? $points : 0,
             'max_score' => $points,
-            'student_answer' => $studentAnswer,
+            'student_answer' => $student !== '' ? $student : $studentAnswer,
             'correct_answer' => $correct,
             'explanation' => $question['explanation'] ?? null,
             'marked_by' => 'auto',
@@ -825,10 +831,20 @@ PROMPT;
 
     protected function markMultipleResponse(array $question, mixed $studentAnswer, int $points, string $qid): array
     {
-        $correct = array_map('strval', $question['correct_answers'] ?? [$question['correct_answer'] ?? '']);
+        $correctRaw = $question['correct_answers'] ?? [$question['correct_answer'] ?? ''];
+        if (!is_array($correctRaw)) {
+            $correctRaw = [$correctRaw];
+        }
+        $correct = array_values(array_filter(array_map(
+            fn ($answer) => QuizAnswerMatcher::resolveCorrectText($question, (string) $answer),
+            $correctRaw
+        )));
         $student = is_array($studentAnswer)
-            ? array_map('strval', $studentAnswer)
-            : array_filter(array_map('trim', explode(',', (string) $studentAnswer)));
+            ? array_map(fn ($answer) => QuizAnswerMatcher::resolveCorrectText($question, (string) $answer), $studentAnswer)
+            : array_filter(array_map(
+                fn ($part) => QuizAnswerMatcher::resolveCorrectText($question, $part),
+                explode(',', (string) $studentAnswer)
+            ));
 
         sort($correct);
         sort($student);
@@ -1435,9 +1451,11 @@ PROMPT;
             $optionsList = array_values($q['options'] ?? []);
             if ($type === 'true_false') {
                 $optionsList = ['True', 'False'];
+            } elseif (in_array($type, ['multiple_choice', 'multiple_response'], true) && count($optionsList) >= 2) {
+                $optionsList = QuizOptionSorter::sort($optionsList);
             }
 
-            $normalized[] = array_filter([
+            $normalizedQuestion = array_filter([
                 'id' => (string) ($q['id'] ?? ('q' . $i)),
                 'type' => $type,
                 'question' => (string) ($q['question'] ?? 'Question'),
@@ -1457,6 +1475,7 @@ PROMPT;
                 'estimated_time' => (int) ($q['estimated_time'] ?? 60),
                 'points' => max(1, (int) ($q['points'] ?? 1)),
             ], fn ($v) => $v !== null && $v !== '');
+            $normalized[] = QuizAnswerMatcher::normalizeQuestionAnswers($normalizedQuestion);
             $i++;
         }
 

@@ -36,7 +36,7 @@ class QuizAntiCheatService
             if (!is_array($question)) {
                 continue;
             }
-            $prepared[] = $this->maybeShuffleOptions($question, $settings, $studentId);
+            $prepared[] = $this->prepareOptionsOrder($question);
         }
 
         $ids = array_values(array_map(fn ($q) => (string) ($q['id'] ?? ''), $prepared));
@@ -56,17 +56,12 @@ class QuizAntiCheatService
     }
 
     /**
-     * @param  array<string, mixed>  $settings
      * @param  array<string, mixed>  $question
      * @return array<string, mixed>
      */
-    protected function maybeShuffleOptions(array $question, array $settings, int $studentId): array
+    protected function prepareOptionsOrder(array $question): array
     {
         $type = (string) ($question['type'] ?? '');
-        if (!($settings['shuffle_options'] ?? true)) {
-            return $question;
-        }
-
         if (!in_array($type, ['multiple_choice', 'multiple_response'], true)) {
             return $question;
         }
@@ -76,7 +71,7 @@ class QuizAntiCheatService
             return $question;
         }
 
-        $question['options'] = $this->deterministicShuffle($options, $studentId, (string) ($question['id'] ?? 'opts'));
+        $question['options'] = QuizOptionSorter::sort($options);
 
         return $question;
     }

@@ -232,8 +232,10 @@ Route::prefix('admin')->group(function () {
     Route::post('instructor/quizzes/{quiz}/publish', [QuizController::class, 'publish']);
     Route::get('instructor/quizzes/{quiz}/analytics', [QuizController::class, 'analytics']);
     Route::get('instructor/quizzes/{quiz}/attempts', [QuizController::class, 'listAttempts']);
+    Route::get('instructor/quizzes/{quiz}/attempts/{attempt}/marking-guide', [QuizController::class, 'downloadMarkingGuide']);
     Route::post('instructor/quizzes/{quiz}/attempts/{attempt}/grade', [QuizController::class, 'gradeAttempt']);
     Route::get('learner/quizzes/{quiz}', [QuizController::class, 'showForLearner']);
+    Route::get('learner/quizzes/{quiz}/attempts/{attempt}/marking-guide', [QuizController::class, 'downloadMarkingGuide']);
     Route::post('learner/quizzes/{quiz}/upload-answer-audio', [QuizController::class, 'uploadAnswerAudio']);
     Route::post('learner/quizzes/{quiz}/submit', [QuizController::class, 'submit']);
     Route::post('instructor/courses', [InstructorDashboardController::class, 'createCourse']);
