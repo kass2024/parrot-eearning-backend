@@ -315,11 +315,12 @@ Rules:
 PROMPT;
 
         $preferGemini = filter_var(config('services.quiz_ai.prefer_gemini_for_speed', true), FILTER_VALIDATE_BOOL);
+        $geminiOnly = filter_var(config('services.quiz_ai.gemini_only', true), FILTER_VALIDATE_BOOL);
         $raw = null;
         $provider = 'local';
         $warnings = [];
 
-        if ($preferGemini) {
+        $tryGemini = function () use ($prompt, &$raw, &$provider, &$warnings): void {
             $gemini = $this->callGemini($prompt, 1200);
             if ($gemini['text'] !== null) {
                 $raw = $gemini['text'];
@@ -327,8 +328,12 @@ PROMPT;
             } elseif ($gemini['error']) {
                 $warnings[] = 'Gemini: ' . $gemini['error'];
             }
+        };
 
-            if ($raw === null) {
+        if ($geminiOnly || $preferGemini) {
+            $tryGemini();
+
+            if ($raw === null && !$geminiOnly) {
                 $claude = $this->callClaude($prompt, 1200);
                 if ($claude['text'] !== null) {
                     $raw = $claude['text'];
@@ -347,13 +352,7 @@ PROMPT;
             }
 
             if ($raw === null) {
-                $gemini = $this->callGemini($prompt, 1200);
-                if ($gemini['text'] !== null) {
-                    $raw = $gemini['text'];
-                    $provider = 'gemini';
-                } elseif ($gemini['error']) {
-                    $warnings[] = 'Gemini: ' . $gemini['error'];
-                }
+                $tryGemini();
             }
         }
 

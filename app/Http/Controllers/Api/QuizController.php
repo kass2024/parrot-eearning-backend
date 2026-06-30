@@ -37,20 +37,20 @@ class QuizController extends Controller
 
     public function aiStatus()
     {
+        $geminiOnly = filter_var(config('services.quiz_ai.gemini_only', true), FILTER_VALIDATE_BOOL);
+        $generationModel = config('services.quiz_ai.generation_model')
+            ?: config('services.gemini.model', 'gemini-2.0-flash');
+
         return response()->json([
             'configured' => $this->quizAi->isConfigured(),
-            'claude' => $this->quizAi->hasClaude(),
+            'claude' => $geminiOnly ? false : $this->quizAi->hasClaude(),
             'gemini' => $this->quizAi->hasGemini(),
-            'generation_provider' => config('services.quiz_ai.generation_provider', 'gemini'),
-            'generation_model' => config('services.quiz_ai.generation_provider', 'gemini') === 'gemini'
-                ? (config('services.quiz_ai.generation_model') ?: config('services.gemini.model', 'gemini-2.0-flash'))
-                : (config('services.quiz_ai.claude_generation_model') ?: config('services.anthropic.model', 'claude-sonnet-4-6')),
-            'fallback_provider' => config('services.quiz_ai.generation_provider', 'gemini') === 'gemini' ? 'claude' : 'gemini',
-            'fallback_model' => config('services.quiz_ai.generation_provider', 'gemini') === 'gemini'
-                ? (config('services.quiz_ai.claude_generation_model') ?: config('services.anthropic.model', 'claude-sonnet-4-6'))
-                : (config('services.quiz_ai.generation_model') ?: config('services.gemini.model', 'gemini-2.0-flash')),
+            'generation_provider' => 'gemini',
+            'generation_model' => $generationModel,
+            'fallback_provider' => $geminiOnly ? null : (config('services.quiz_ai.generation_provider', 'gemini') === 'gemini' ? 'claude' : 'gemini'),
+            'fallback_model' => $geminiOnly ? null : ($generationModel),
             'marking_primary' => config('services.quiz_ai.marking_primary', 'gemini'),
-            'marking_secondary' => config('services.quiz_ai.marking_secondary', 'claude'),
+            'marking_secondary' => $geminiOnly ? 'gemini' : config('services.quiz_ai.marking_secondary', 'gemini'),
             'local_document_extraction' => !filter_var(config('services.quiz_ai.use_ai_knowledge_map', false), FILTER_VALIDATE_BOOL),
             'embeddings_enabled' => filter_var(config('services.quiz_ai.enable_embeddings', false), FILTER_VALIDATE_BOOL),
             'quiz_modes' => [

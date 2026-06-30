@@ -48,7 +48,16 @@ class QuizAiService
 
     public function isConfigured(): bool
     {
+        if ($this->usesGeminiOnly()) {
+            return $this->hasGemini();
+        }
+
         return $this->hasClaude() || $this->hasGemini();
+    }
+
+    protected function usesGeminiOnly(): bool
+    {
+        return filter_var(config('services.quiz_ai.gemini_only', true), FILTER_VALIDATE_BOOL);
     }
 
     public function hasClaude(): bool
@@ -166,12 +175,16 @@ class QuizAiService
         $provider = 'gemini';
 
         foreach ($this->resolveAiProviderOrder('generation') as $name) {
-            if ($name === 'claude' && $this->hasClaude()) {
-                $raw = $this->callClaude($prompt, $maxTokens, $this->resolveGenerationModel());
-                $provider = 'claude';
-            } elseif ($name === 'gemini' && $this->hasGemini()) {
+            if ($name === 'gemini') {
+                if (!$this->hasGemini()) {
+                    $this->lastAiError = 'Gemini API key not configured. Set GOOGLE_AI_API_KEY in .env.';
+                    continue;
+                }
                 $raw = $this->callGemini($prompt, $maxTokens, true);
                 $provider = 'gemini';
+            } elseif ($name === 'claude' && !$this->usesGeminiOnly() && $this->hasClaude()) {
+                $raw = $this->callClaude($prompt, $maxTokens, $this->resolveGenerationModel());
+                $provider = 'claude';
             }
 
             if ($raw !== null) {
@@ -180,7 +193,9 @@ class QuizAiService
         }
 
         if ($raw === null) {
-            $detail = $this->lastAiError ?: 'Both Claude and Gemini returned no response.';
+            $detail = $this->lastAiError ?: ($this->usesGeminiOnly()
+                ? 'Gemini returned no response.'
+                : 'Both Claude and Gemini returned no response.');
             throw new \RuntimeException('AI quiz generation failed: ' . $detail);
         }
 
@@ -216,6 +231,12 @@ class QuizAiService
         $keys = $this->geminiApiKeys();
         $key = reset($keys);
         if (!is_string($key) || $key === '') {
+            if ($this->usesGeminiOnly()) {
+                throw new \RuntimeException(
+                    'AI quiz generation failed: Gemini API key not configured. Set GOOGLE_AI_API_KEY in .env.'
+                );
+            }
+
             return $this->generateQuestionsSingleCall(
                 $course,
                 $topic,
@@ -496,7 +517,11 @@ class QuizAiService
                 : 'Submitted. Some answers were auto-marked; oral responses await instructor review.';
         }
 
-        if ($pendingManual === 0 && ($this->hasGemini() || $this->hasClaude())) {
+        $canUseAiFeedback = $this->usesGeminiOnly()
+            ? $this->hasGemini()
+            : ($this->hasGemini() || $this->hasClaude());
+
+        if ($pendingManual === 0 && $canUseAiFeedback) {
             $analytics = $this->buildPersonalizedFeedback($results, $percentage, $passingScore);
             if ($analytics && empty($overallFeedback)) {
                 $overallFeedback = (string) ($analytics['summary'] ?? '');
@@ -656,13 +681,13 @@ class QuizAiService
      */
     protected function resolveAiProviderOrder(string $context = 'generation'): array
     {
-        if (filter_var(config('services.quiz_ai.gemini_only', true), FILTER_VALIDATE_BOOL) && $this->hasGemini()) {
+        if ($this->usesGeminiOnly()) {
             return ['gemini'];
         }
 
         if ($context === 'marking') {
             $primary = strtolower((string) config('services.quiz_ai.marking_primary', 'gemini'));
-            $secondary = strtolower((string) config('services.quiz_ai.marking_secondary', 'claude'));
+            $secondary = strtolower((string) config('services.quiz_ai.marking_secondary', 'gemini'));
         } else {
             $primary = strtolower((string) config('services.quiz_ai.generation_provider', 'gemini'));
             $secondary = $primary === 'gemini' ? 'claude' : 'gemini';
@@ -1051,12 +1076,16 @@ PROMPT;
         $provider = 'gemini';
 
         foreach ($this->resolveAiProviderOrder('marking') as $name) {
-            if ($name === 'claude' && $this->hasClaude()) {
-                $raw = $this->callClaude($prompt, 2048);
-                $provider = 'claude';
-            } elseif ($name === 'gemini' && $this->hasGemini()) {
+            if ($name === 'gemini') {
+                if (!$this->hasGemini()) {
+                    $this->lastAiError = 'Gemini API key not configured. Set GOOGLE_AI_API_KEY in .env.';
+                    continue;
+                }
                 $raw = $this->callGemini($prompt, 2048, true);
                 $provider = 'gemini';
+            } elseif ($name === 'claude' && !$this->usesGeminiOnly() && $this->hasClaude()) {
+                $raw = $this->callClaude($prompt, 2048);
+                $provider = 'claude';
             }
 
             if ($raw !== null) {
@@ -1115,10 +1144,13 @@ PROMPT;
 
         $raw = null;
         foreach ($this->resolveAiProviderOrder('marking') as $name) {
-            if ($name === 'claude' && $this->hasClaude()) {
-                $raw = $this->callClaude($prompt, 800);
-            } elseif ($name === 'gemini' && $this->hasGemini()) {
+            if ($name === 'gemini') {
+                if (!$this->hasGemini()) {
+                    continue;
+                }
                 $raw = $this->callGemini($prompt, 800, true);
+            } elseif ($name === 'claude' && !$this->usesGeminiOnly() && $this->hasClaude()) {
+                $raw = $this->callClaude($prompt, 800);
             }
             if ($raw !== null) {
                 break;
