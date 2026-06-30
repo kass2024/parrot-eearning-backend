@@ -23,6 +23,9 @@ use App\Http\Controllers\Api\AdminReportsController;
 use App\Http\Controllers\Api\SystemController;
 use App\Http\Controllers\Api\InstructorDashboardController;
 use App\Http\Controllers\Api\QuizController;
+use App\Http\Controllers\Api\PlatformInstitutionController;
+use App\Http\Controllers\Api\InstitutionSignupController;
+use App\Http\Controllers\Api\PublicStorageController;
 use App\Http\Controllers\Api\LearnerDashboardController;
 use App\Http\Controllers\Api\StudyShiftChangeRequestController;
 use App\Http\Controllers\Api\CertificateController;
@@ -44,12 +47,20 @@ Route::prefix('admin')->group(function () {
     Route::get('system/health', [SystemController::class, 'health']);
     Route::get('system/pcloud', [SystemController::class, 'pcloudHealth']);
     Route::post('system/migrate', [SystemController::class, 'migrate']);
-    Route::post('system/setup-programs', [SystemController::class, 'setupPrograms']);
+    Route::get('public-storage/{path}', [PublicStorageController::class, 'show'])->where('path', '.*');
 
     // Auth
     Route::post('auth/login', [AuthController::class, 'login']);
     Route::post('auth/register-student', [AuthController::class, 'registerStudent']);
     Route::post('auth/register-instructor', [AuthController::class, 'registerInstructor']);
+    Route::get('institution-signup/config', [InstitutionSignupController::class, 'config']);
+    Route::get('institution-signup/choices', [InstitutionSignupController::class, 'choices']);
+    Route::post('institution-signup/validate-promo', [InstitutionSignupController::class, 'validatePromo']);
+    Route::post('institution-signup/register', [InstitutionSignupController::class, 'register']);
+    Route::post('institution-signup/complete-payment', [InstitutionSignupController::class, 'completePayment']);
+    Route::get('platform-institutions/context', [PlatformInstitutionController::class, 'context']);
+    Route::get('platform-institutions/my-settings', [PlatformInstitutionController::class, 'mySettings']);
+    Route::post('platform-institutions/my-branding', [PlatformInstitutionController::class, 'updateMyBranding']);
     Route::patch('auth/profile', [AuthController::class, 'updateProfile']);
     Route::post('auth/change-password', [AuthController::class, 'changePassword']);
     Route::get('auth/google/redirect', [AuthController::class, 'redirectToGoogle']);
@@ -171,6 +182,7 @@ Route::prefix('admin')->group(function () {
     Route::get('students', [StudentController::class, 'index']);
     Route::post('students', [StudentController::class, 'store']);
     Route::put('students/{student}', [StudentController::class, 'update']);
+    Route::post('students/{student}/move-institution', [StudentController::class, 'moveInstitution']);
     Route::delete('students/{student}', [StudentController::class, 'destroy']);
     Route::post('students/upload-document', [StudentController::class, 'uploadDocument']);
     Route::post('students/test-email', [StudentController::class, 'testEmail']);
@@ -210,12 +222,19 @@ Route::prefix('admin')->group(function () {
     Route::get('instructor/quizzes/topics', [QuizController::class, 'courseTopics']);
     Route::post('instructor/quizzes/analyze-material', [QuizController::class, 'analyzeMaterial']);
     Route::post('instructor/quizzes/generate', [QuizController::class, 'generate']);
+    Route::post('instructor/quizzes/upload-prompt-audio', [QuizController::class, 'uploadPromptAudio']);
+    Route::get('instructor/quizzes/pcloud-upload-config', [QuizController::class, 'prepareQuizAudioUpload']);
+    Route::post('instructor/quizzes/register-prompt-audio', [QuizController::class, 'registerQuizPromptAudio']);
+    Route::get('courses/{course}/assessment-audio/stream', [QuizController::class, 'streamAssessmentAudio']);
     Route::post('instructor/quizzes/ai', [QuizController::class, 'store']);
     Route::get('instructor/quizzes/{quiz}', [QuizController::class, 'showForInstructor']);
     Route::put('instructor/quizzes/{quiz}', [QuizController::class, 'update']);
     Route::post('instructor/quizzes/{quiz}/publish', [QuizController::class, 'publish']);
     Route::get('instructor/quizzes/{quiz}/analytics', [QuizController::class, 'analytics']);
+    Route::get('instructor/quizzes/{quiz}/attempts', [QuizController::class, 'listAttempts']);
+    Route::post('instructor/quizzes/{quiz}/attempts/{attempt}/grade', [QuizController::class, 'gradeAttempt']);
     Route::get('learner/quizzes/{quiz}', [QuizController::class, 'showForLearner']);
+    Route::post('learner/quizzes/{quiz}/upload-answer-audio', [QuizController::class, 'uploadAnswerAudio']);
     Route::post('learner/quizzes/{quiz}/submit', [QuizController::class, 'submit']);
     Route::post('instructor/courses', [InstructorDashboardController::class, 'createCourse']);
     Route::put('instructor/courses/{course}', [InstructorDashboardController::class, 'updateCourse']);
@@ -224,6 +243,19 @@ Route::prefix('admin')->group(function () {
     Route::post('instructor/payout-requests', [InstructorDashboardController::class, 'requestPayout']);
 
     Route::post('users', [UserController::class, 'store']);
+    Route::get('platform-institutions', [PlatformInstitutionController::class, 'index']);
+    Route::get('platform-institutions/{platformInstitution}', [PlatformInstitutionController::class, 'show']);
+    Route::put('platform-institutions/{platformInstitution}', [PlatformInstitutionController::class, 'update']);
+    Route::post('platform-institutions/{platformInstitution}/test-mail', [PlatformInstitutionController::class, 'sendTestMail']);
+    Route::post('platform-institutions/{platformInstitution}/approve', [PlatformInstitutionController::class, 'approve']);
+    Route::post('platform-institutions/{platformInstitution}/disable', [PlatformInstitutionController::class, 'disable']);
+    Route::post('platform-institutions/{platformInstitution}/enable', [PlatformInstitutionController::class, 'enable']);
+    Route::post('platform-institutions/{platformInstitution}/resend-credentials', [PlatformInstitutionController::class, 'resendCredentials']);
+    Route::post('platform-institutions/{platformInstitution}/payment-reminder', [PlatformInstitutionController::class, 'sendPaymentReminder']);
+    Route::post('platform-institutions/{platformInstitution}/logo', [PlatformInstitutionController::class, 'uploadLogo']);
+    Route::delete('platform-institutions/{platformInstitution}', [PlatformInstitutionController::class, 'destroy']);
+    Route::get('institution-promo-codes', [PlatformInstitutionController::class, 'promoCodes']);
+    Route::post('institution-promo-codes', [PlatformInstitutionController::class, 'storePromoCode']);
     Route::put('users/{user}', [UserController::class, 'update']);
     Route::delete('users/{user}', [UserController::class, 'destroy']);
 

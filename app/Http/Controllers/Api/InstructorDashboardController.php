@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Support\CourseMaterialHelper;
 use App\Support\QuizMaterialHelper;
 use App\Support\CourseDetailsHelper;
+use App\Support\CourseRevenueCalculator;
 use App\Services\ZoomService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;

@@ -20,6 +20,7 @@ class Student extends Model
         'phone',
         'country',
         'primary_goal',
+        'platform_institution_id',
     ];
 
     protected static function booted(): void
@@ -76,5 +77,10 @@ class Student extends Model
         } else {
             $this->attributes['password'] = Hash::make($value);
         }
+    }
+
+    public function platformInstitution()
+    {
+        return $this->belongsTo(PlatformInstitution::class, 'platform_institution_id');
     }
 }

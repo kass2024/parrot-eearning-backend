@@ -9,6 +9,10 @@ use Illuminate\Support\Facades\Log;
 
 class PCloudService
 {
+    public const MATERIALS_SUBFOLDER = 'materials';
+
+    public const ASSESSMENT_AUDIO_SUBFOLDER = 'assessment-audio';
+
     protected string $baseUrl;
 
     protected ?string $accessToken;
@@ -25,7 +29,7 @@ class PCloudService
         $this->accessToken = self::normalizeAccessToken(
             config('services.pcloud.access_token') ?: env('PCLOUD_ACCESS_TOKEN')
         );
-        $this->rootFolder = trim((string) config('services.pcloud.root_folder', 'parrotacademy'), '/');
+        $this->rootFolder = trim((string) config('services.pcloud.root_folder', 'ParrotAcademy'), '/');
 
         $rootId = config('services.pcloud.root_folder_id') ?: env('PCLOUD_ROOT_FOLDER_ID', 31887143130);
         if (is_numeric($rootId) && (int) $rootId > 0) {
@@ -114,6 +118,7 @@ class PCloudService
                 'ok' => ($uploadTest['ok'] ?? false),
                 'api_host' => $host,
                 'root_folder_id' => $this->rootFolderId,
+                'root_folder_name' => $this->rootFolder,
                 'token_length' => strlen((string) $this->accessToken),
                 'email' => is_array($info) ? ($info['email'] ?? null) : null,
                 'upload_test' => $uploadTest,
@@ -194,19 +199,28 @@ class PCloudService
     /**
      * Config for browser → pCloud direct upload (file never touches cPanel disk).
      *
-     * @return array{upload_url: string, folderid: int, access_token: string, folder_path: string}
+     * @return array{upload_url: string, folderid: int, access_token?: string, folder_path: string, upload_mode: string, root_folderid?: int|null, root_folder_name?: string}
      */
-    public function directUploadConfig(int $courseId): array
+    public function directUploadConfig(int $courseId, ?string $subfolder = null, bool $includeAccessToken = false): array
     {
-        $folder = $this->ensureCourseFolder($courseId);
+        $folder = $subfolder !== null && $subfolder !== ''
+            ? $this->ensureCourseSubfolder($courseId, $subfolder)
+            : $this->ensureCourseFolder($courseId);
 
-        return [
-            'upload_mode' => 'api',
+        $config = [
+            'upload_mode' => $includeAccessToken ? 'direct' : 'api',
             'upload_url' => $this->uploadBaseUrl() . '/uploadfile',
             'folderid' => (int) $folder['folderid'],
             'root_folderid' => $this->rootFolderId,
+            'root_folder_name' => $this->rootFolder,
             'folder_path' => (string) $folder['path'],
         ];
+
+        if ($includeAccessToken) {
+            $config['access_token'] = $this->accessToken;
+        }
+
+        return $config;
     }
 
     public function fileInCourseFolder(int $courseId, int $fileId): bool
@@ -215,23 +229,85 @@ class PCloudService
         $courseFolder = $this->ensureCourseFolder($courseId);
         $courseFolderId = (int) ($courseFolder['folderid'] ?? 0);
 
-        $response = $this->request('GET', '/stat', ['fileid' => $fileId]);
+        if ($courseFolderId <= 0) {
+            return false;
+        }
 
+        return $this->fileIsUnderFolder($fileId, $courseFolderId, $courseId);
+    }
+
+    protected function fileIsUnderFolder(int $fileId, int $ancestorFolderId, int $courseId, int $depth = 0): bool
+    {
+        if ($depth > 12) {
+            return false;
+        }
+
+        $response = $this->request('GET', '/stat', ['fileid' => $fileId]);
         if (($response['result'] ?? 1) !== 0) {
             return false;
         }
 
         $meta = is_array($response['metadata'] ?? null) ? $response['metadata'] : [];
-        $parentFolderId = (int) ($meta['parentfolderid'] ?? 0);
-
-        if ($courseFolderId > 0 && $parentFolderId === $courseFolderId) {
+        if ($this->pathBelongsToCourse((string) ($meta['path'] ?? ''), $courseId)) {
             return true;
         }
 
-        $path = (string) ($meta['path'] ?? '');
-        $prefix = $this->courseFolderPath($courseId);
+        $parentFolderId = (int) ($meta['parentfolderid'] ?? 0);
+        if ($parentFolderId === $ancestorFolderId) {
+            return true;
+        }
 
-        return $path === $prefix || str_starts_with($path, rtrim($prefix, '/') . '/');
+        if ($parentFolderId <= 0) {
+            return false;
+        }
+
+        return $this->folderIsUnderFolder($parentFolderId, $ancestorFolderId, $courseId, $depth + 1);
+    }
+
+    protected function folderIsUnderFolder(int $folderId, int $ancestorFolderId, int $courseId, int $depth = 0): bool
+    {
+        if ($depth > 12 || $folderId <= 0) {
+            return false;
+        }
+
+        if ($folderId === $ancestorFolderId) {
+            return true;
+        }
+
+        $response = $this->request('GET', '/stat', ['fileid' => $folderId]);
+        if (($response['result'] ?? 1) !== 0) {
+            return false;
+        }
+
+        $meta = is_array($response['metadata'] ?? null) ? $response['metadata'] : [];
+        if ($this->pathBelongsToCourse((string) ($meta['path'] ?? ''), $courseId)) {
+            return true;
+        }
+
+        $parentFolderId = (int) ($meta['parentfolderid'] ?? 0);
+        if ($parentFolderId === $ancestorFolderId) {
+            return true;
+        }
+
+        if ($parentFolderId <= 0) {
+            return false;
+        }
+
+        return $this->folderIsUnderFolder($parentFolderId, $ancestorFolderId, $courseId, $depth + 1);
+    }
+
+    protected function pathBelongsToCourse(string $path, int $courseId): bool
+    {
+        $path = strtolower($path);
+        if ($path === '') {
+            return false;
+        }
+
+        $segment = 'course-' . $courseId;
+
+        return str_contains($path, '/' . $segment . '/')
+            || str_ends_with(rtrim($path, '/'), '/' . $segment)
+            || str_ends_with(rtrim($path, '/'), $segment);
     }
 
     public function uploadBaseUrl(): string
@@ -595,6 +671,42 @@ class PCloudService
     /**
      * @return array{folderid: int, path: string}
      */
+    public function ensureCourseSubfolder(int $courseId, string $subfolder): array
+    {
+        $this->assertConfigured();
+        $course = $this->ensureCourseFolder($courseId);
+        $courseFolderId = (int) ($course['folderid'] ?? 0);
+        $name = trim($subfolder, '/');
+
+        if ($name === '') {
+            return $course;
+        }
+
+        $response = $this->request('GET', '/createfolderifnotexists', [
+            'folderid' => $courseFolderId,
+            'name' => $name,
+        ]);
+
+        if (($response['result'] ?? 1) !== 0) {
+            $response = $this->request('GET', '/createfolder', [
+                'folderid' => $courseFolderId,
+                'name' => $name,
+            ]);
+        }
+
+        $this->assertOk($response, 'Unable to create pCloud subfolder: ' . $name);
+
+        $meta = is_array($response['metadata'] ?? null) ? $response['metadata'] : [];
+
+        return [
+            'folderid' => (int) ($meta['folderid'] ?? $meta['id'] ?? 0),
+            'path' => (string) ($meta['path'] ?? (rtrim((string) $course['path'], '/') . '/' . $name)),
+        ];
+    }
+
+    /**
+     * @return array{folderid: int, path: string}
+     */
     protected function ensureCourseFolderUnderRootId(int $courseId): array
     {
         $name = 'course-' . $courseId;
@@ -654,9 +766,11 @@ class PCloudService
     /**
      * @return array<string, mixed>
      */
-    public function uploadToCourse(int $courseId, UploadedFile $file): array
+    public function uploadToCourse(int $courseId, UploadedFile $file, ?string $subfolder = null): array
     {
-        $folder = $this->ensureCourseFolder($courseId);
+        $folder = $subfolder !== null && $subfolder !== ''
+            ? $this->ensureCourseSubfolder($courseId, $subfolder)
+            : $this->ensureCourseFolder($courseId);
         $folderId = (int) $folder['folderid'];
         $size = (int) $file->getSize();
 

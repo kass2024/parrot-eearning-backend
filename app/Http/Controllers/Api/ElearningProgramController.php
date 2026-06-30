@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\ElearningProgram;
 use App\Support\ApiListCache;
+use App\Support\PlatformTenantScope;
 use App\Services\CourseProgramAssignmentService;
 use Illuminate\Http\Request;
 
@@ -14,7 +15,31 @@ class ElearningProgramController extends Controller
     {
         $withCourses = $request->boolean('with_courses');
         $activeOnly = $request->boolean('active_only');
-        $cacheKey = $withCourses ? 'with_courses' : ($activeOnly ? 'active' : 'all');
+        $tenantId = PlatformTenantScope::resolveTenantId($request);
+        $cacheKey = ($tenantId ? 'inst_' . $tenantId . '_' : '') . ($withCourses ? 'with_courses' : ($activeOnly ? 'active' : 'all'));
+
+        if ($tenantId !== null) {
+            $query = ElearningProgram::query()
+                ->where('platform_institution_id', $tenantId)
+                ->orderBy('sort_order')
+                ->orderBy('name');
+
+            if ($activeOnly) {
+                $query->where('status', 'Active');
+            }
+
+            if ($withCourses) {
+                $query->with(['courses' => function ($q) use ($activeOnly, $tenantId) {
+                    $q->where('platform_institution_id', $tenantId);
+                    if ($activeOnly) {
+                        $q->where('status', 'Active');
+                    }
+                    $q->orderBy('title');
+                }]);
+            }
+
+            return response()->json($query->get(), 200);
+        }
 
         $programs = ApiListCache::remember('elearning_programs', $cacheKey, 120, function () use ($withCourses, $activeOnly) {
             $query = ElearningProgram::query()
@@ -40,8 +65,9 @@ class ElearningProgramController extends Controller
         return response()->json($programs, 200);
     }
 
-    public function show(ElearningProgram $elearningProgram)
+    public function show(Request $request, ElearningProgram $elearningProgram)
     {
+        PlatformTenantScope::assertCanAccess($request, $elearningProgram);
         $elearningProgram->load(['courses' => fn ($q) => $q->orderBy('title')]);
 
         return response()->json($elearningProgram, 200);
@@ -64,6 +90,7 @@ class ElearningProgramController extends Controller
 
         $data['status'] = $data['status'] ?? 'Active';
         $data['sort_order'] = $data['sort_order'] ?? 0;
+        PlatformTenantScope::stampInstitutionId($request, $data);
 
         $program = ElearningProgram::create($data);
 
@@ -77,6 +104,7 @@ class ElearningProgramController extends Controller
 
     public function update(Request $request, ElearningProgram $elearningProgram)
     {
+        PlatformTenantScope::assertCanAccess($request, $elearningProgram);
         $data = $request->validate([
             'name' => 'sometimes|required|string|max:255',
             'description' => 'nullable|string',
@@ -101,8 +129,9 @@ class ElearningProgramController extends Controller
         ]);
     }
 
-    public function destroy(ElearningProgram $elearningProgram)
+    public function destroy(Request $request, ElearningProgram $elearningProgram)
     {
+        PlatformTenantScope::assertCanAccess($request, $elearningProgram);
         if ($elearningProgram->courses()->exists()) {
             return response()->json([
                 'message' => 'Cannot delete a program that still has courses. Reassign or remove courses first.',
@@ -118,6 +147,7 @@ class ElearningProgramController extends Controller
 
     public function assignCourses(Request $request, ElearningProgram $elearningProgram, CourseProgramAssignmentService $assignment)
     {
+        PlatformTenantScope::assertCanAccess($request, $elearningProgram);
         $data = $request->validate([
             'course_ids' => 'required|array|min:1',
             'course_ids.*' => 'integer|exists:courses,id',

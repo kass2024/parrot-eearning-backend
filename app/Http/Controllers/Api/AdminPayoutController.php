@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\InstructorPayoutRequest;
 use App\Support\InstructorPayoutMethods;
+use App\Support\PlatformTenantScope;
 use Illuminate\Http\Request;
 
 class AdminPayoutController extends Controller
@@ -12,10 +13,15 @@ class AdminPayoutController extends Controller
     public function index(Request $request)
     {
         $status = $request->query('status');
+        $tenantId = PlatformTenantScope::resolveTenantId($request);
 
         $query = InstructorPayoutRequest::query()
-            ->with('instructor:id,name,email')
+            ->with('instructor:id,name,email,platform_institution_id')
             ->orderByDesc('id');
+
+        if ($tenantId !== null) {
+            $query->whereHas('instructor', fn ($q) => $q->where('platform_institution_id', $tenantId));
+        }
 
         if ($status) {
             $query->where('status', $status);
@@ -36,9 +42,14 @@ class AdminPayoutController extends Controller
             'processed_at' => $row->processed_at?->toIso8601String(),
         ]);
 
-        $pending = InstructorPayoutRequest::query()
-            ->whereIn('status', ['pending', 'processing'])
-            ->get();
+        $pendingQuery = InstructorPayoutRequest::query()
+            ->whereIn('status', ['pending', 'processing']);
+
+        if ($tenantId !== null) {
+            $pendingQuery->whereHas('instructor', fn ($q) => $q->where('platform_institution_id', $tenantId));
+        }
+
+        $pending = $pendingQuery->get();
 
         return response()->json([
             'payoutRequests' => $rows,

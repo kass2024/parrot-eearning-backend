@@ -17,6 +17,20 @@ class MailDeliveryService
         }, array_merge($context, ['to' => $to, 'type' => 'mailable']));
     }
 
+    public function sendToForInstitution(
+        ?int $platformInstitutionId,
+        string $to,
+        Mailable $mailable,
+        array $context = [],
+    ): bool {
+        return app(InstitutionMailResolver::class)->sendForInstitution(
+            $platformInstitutionId,
+            $to,
+            $mailable,
+            array_merge($context, ['type' => 'mailable']),
+        );
+    }
+
     public function sendView(string $view, array $data, callable $callback, array $context = []): bool
     {
         return $this->attempt(function () use ($view, $data, $callback) {
@@ -70,17 +84,17 @@ class MailDeliveryService
         }
 
         if ($activeHost && str_starts_with($activeHost, 'mail.') && filter_var($smtp['verify_peer'] ?? true, FILTER_VALIDATE_BOOL)) {
-            $warnings[] = 'Using mail.yourdomain.com often causes SSL certificate errors on shared cPanel hosting. Prefer MAIL_HOST=parrotglobalstudyacademy.ca or set MAIL_VERIFY_PEER=false for local XAMPP.';
+            $warnings[] = 'Using mail.yourdomain.com often causes SSL certificate errors on shared cPanel hosting. Prefer MAIL_HOST=xanderglobalscholars.com or set MAIL_VERIFY_PEER=false for local XAMPP.';
         }
 
         if (($smtp['local_domain'] ?? '') === 'localhost') {
-            $warnings[] = 'SMTP EHLO domain is localhost. Set MAIL_EHLO_DOMAIN=parrotglobalstudyacademy.ca in .env.';
+            $warnings[] = 'SMTP EHLO domain is localhost. Set MAIL_EHLO_DOMAIN=xanderglobalscholars.com in .env.';
         }
 
         $connection = $this->probeSmtp();
 
         if (($connection['status'] ?? '') === 'auth_failed') {
-            $warnings[] = 'SMTP authentication failed (535). In cPanel → Email Accounts, confirm infos@parrotglobalstudyacademy.ca exists and reset its password to match MAIL_PASSWORD in .env.';
+            $warnings[] = 'SMTP authentication failed (535). In cPanel → Email Accounts, confirm admission@xanderglobalscholars.com exists and reset its password to match MAIL_PASSWORD in .env.';
         }
 
         return [

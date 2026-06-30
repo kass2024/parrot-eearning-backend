@@ -16,12 +16,7 @@ class FrontendUrl
 
         $appUrl = rtrim((string) config('app.url', ''), '/');
 
-        // Parrot production: API on api.parrotglobalstudyacademy.ca → learner app on parrotglobalstudyacademy.ca
-        if ($appUrl !== '' && preg_match('#^https?://api\.parrotglobalstudyacademy\.ca#i', $appUrl)) {
-            return 'https://parrotglobalstudyacademy.ca';
-        }
-
-        // Legacy Xander production (kept for old deployments)
+        // Xander production: API on api.xanderglobalscholars.com → learner app on xanderglobalacademy.com
         if ($appUrl !== '' && preg_match('#^https?://api\.xanderglobalscholars\.com#i', $appUrl)) {
             return 'https://xanderglobalacademy.com';
         }

@@ -13,6 +13,7 @@ class LiveZoomCohort extends Model
     protected $table = 'livezoom_cohort';
 
     protected $fillable = [
+        'platform_institution_id',
         'day_of_week',
         'available_on_date',
         'start_time',

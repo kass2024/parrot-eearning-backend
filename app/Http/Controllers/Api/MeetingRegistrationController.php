@@ -21,6 +21,7 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
 use App\Services\MailDeliveryService;
 use App\Support\AdminRecordingCatalog;
+use App\Support\FrontendUrl;
 use Illuminate\Support\Str;
 use Carbon\Carbon;
 
@@ -654,6 +655,7 @@ class MeetingRegistrationController extends Controller
         $settings->zoom_join_url = $joinUrl;
         $settings->zoom_start_url = $startUrl;
         $settings->zoom_scheduled_at = $startAt;
+        $this->applyWebinarMeetingSecrets($settings, $meeting);
         $settings->save();
 
         $this->syncApprovedRegistrationZoomLinks($joinUrl, $meetingId);
@@ -723,6 +725,7 @@ class MeetingRegistrationController extends Controller
         $settings->zoom_start_url = $startUrl;
         $settings->zoom_scheduled_at = now();
         $settings->session_started_at = now();
+        $this->applyWebinarMeetingSecrets($settings, $meeting);
         $settings->save();
 
         $this->syncApprovedRegistrationZoomLinks($joinUrl, $meetingId);
@@ -732,6 +735,53 @@ class MeetingRegistrationController extends Controller
             'settings' => $settings,
             'meeting' => $meeting,
         ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $meeting
+     */
+    private function applyWebinarMeetingSecrets(WebinarSetting $settings, array $meeting): void
+    {
+        $password = is_string($meeting['password'] ?? null) ? trim($meeting['password']) : '';
+        if ($password === '') {
+            $password = $this->zoom->extractPasswordFromJoinUrl($meeting['join_url'] ?? null) ?? '';
+        }
+        if ($password === '') {
+            $password = $this->zoom->extractPasswordFromJoinUrl($meeting['start_url'] ?? null) ?? '';
+        }
+
+        if ($password !== '' && Schema::hasColumn('webinar_settings', 'zoom_password')) {
+            $settings->zoom_password = $password;
+        }
+    }
+
+    private function backfillWebinarMeetingSecrets(WebinarSetting $settings): void
+    {
+        if (!Schema::hasColumn('webinar_settings', 'zoom_password')) {
+            return;
+        }
+
+        if (trim((string) ($settings->zoom_password ?? '')) !== '') {
+            return;
+        }
+
+        $meetingId = trim((string) ($settings->zoom_meeting_id ?? ''));
+        if ($meetingId === '') {
+            return;
+        }
+
+        $meeting = ['join_url' => $settings->zoom_join_url, 'start_url' => $settings->zoom_start_url];
+        if ($this->zoom->canManageMeetingViaApi($meetingId)) {
+            $details = $this->zoom->getMeeting($meetingId);
+            if (is_array($details) && empty($details['error'])) {
+                $meeting = array_merge($meeting, $details);
+            }
+        }
+
+        $this->applyWebinarMeetingSecrets($settings, $meeting);
+        if ($settings->isDirty('zoom_password')) {
+            $settings->save();
+        }
     }
 
     private function resolvePathwaysStartUrl(WebinarSetting $settings): ?string
@@ -763,8 +813,9 @@ class MeetingRegistrationController extends Controller
     {
         $settings = WebinarSetting::current();
         $approvedCount = $this->approvedRegistrationCount();
+        $share = $this->webinarSharePayload($settings);
 
-        return response()->json([
+        return response()->json(array_merge([
             'approved_participants' => $approvedCount,
             'can_start' => $approvedCount > 0,
             'recording_enabled' => (bool) $settings->recording_enabled,
@@ -775,7 +826,67 @@ class MeetingRegistrationController extends Controller
             'session_started_at' => $settings->session_started_at?->toIso8601String(),
             'zoom_api_configured' => $this->zoom->isConfigured(),
             'session_active' => !empty($settings->zoom_meeting_id) && !empty($settings->zoom_start_url),
-        ]);
+        ], $share));
+    }
+
+    /**
+     * @return array{
+     *     topic: string,
+     *     share_text: string|null,
+     *     password: string|null,
+     *     registration_url: string,
+     *     app_host_room_url: string,
+     *     app_participant_join_url: string|null,
+     *     app_host_room_path: string,
+     *     app_participant_join_path: string|null
+     * }
+     */
+    private function webinarSharePayload(WebinarSetting $settings): array
+    {
+        $meetingId = trim((string) ($settings->zoom_meeting_id ?? ''));
+        $base = \App\Support\FrontendUrl::base();
+        $registrationUrl = $base . '/meeting-registration';
+        $hostPath = '/meeting/room?webinar_host=1&role=1';
+        $hostRoomUrl = $base . $hostPath;
+        $participantPath = $meetingId !== ''
+            ? '/meeting/room?meeting_number=' . rawurlencode($meetingId) . '&role=0'
+            : null;
+        $participantUrl = $participantPath ? $base . $participantPath : null;
+
+        $password = '';
+        if (Schema::hasColumn('webinar_settings', 'zoom_password')) {
+            $password = trim((string) ($settings->zoom_password ?? ''));
+        }
+
+        $lines = ['Meeting Registration — Pathways Webinar'];
+        if ($settings->zoom_scheduled_at) {
+            $lines[] = 'Scheduled: ' . $settings->zoom_scheduled_at->format('l, F j, Y g:i A T');
+        }
+        if ($meetingId !== '') {
+            $lines[] = 'Meeting ID: ' . $meetingId;
+        }
+        if ($password !== '') {
+            $lines[] = 'Passcode: ' . $password;
+        }
+        if (!empty($settings->zoom_join_url)) {
+            $lines[] = 'Zoom join link: ' . $settings->zoom_join_url;
+        }
+        $lines[] = 'Registration page: ' . $registrationUrl;
+        if ($participantUrl) {
+            $lines[] = 'Join in app (approved participants): ' . $participantUrl;
+        }
+        $lines[] = 'Host: open Meeting Registration → Start Meeting to join in-app.';
+
+        return [
+            'topic' => 'Meeting Registration Webinar',
+            'share_text' => implode("\n", $lines),
+            'password' => $password !== '' ? $password : null,
+            'registration_url' => $registrationUrl,
+            'app_host_room_url' => $hostRoomUrl,
+            'app_participant_join_url' => $participantUrl,
+            'app_host_room_path' => $hostPath,
+            'app_participant_join_path' => $participantPath,
+        ];
     }
 
     public function startWebinar()
@@ -828,6 +939,8 @@ class MeetingRegistrationController extends Controller
         if ($settings->recording_enabled && $meetingId && $this->zoom->canManageMeetingViaApi($meetingId)) {
             $this->zoom->setMeetingAutoRecording($meetingId, true);
         }
+
+        $this->backfillWebinarMeetingSecrets($settings);
 
         $settings->session_started_at = now();
         $settings->save();

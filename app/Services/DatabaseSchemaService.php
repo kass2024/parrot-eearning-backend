@@ -142,6 +142,10 @@ class DatabaseSchemaService
 
 
 
+        \App\Support\StorageLinkHelper::ensure();
+
+
+
         return [
 
             'success' => count($this->pendingMigrations()) === 0,
@@ -334,9 +338,25 @@ class DatabaseSchemaService
 
 
 
+        $adminCount = User::query()->where('role', 'admin')->count();
         $instructorCount = User::query()->where('role', 'instructor')->count();
 
+        if ($adminCount === 0) {
+            try {
+                Artisan::call('db:seed', [
+                    '--class' => 'Database\\Seeders\\DatabaseSeeder',
+                    '--force' => true,
+                ]);
+            } catch (\Throwable $e) {
+                Log::warning('Platform user seed failed', ['error' => $e->getMessage()]);
+            }
+        }
+
+        $this->ensureInstitutionSamples();
+
         if ($instructorCount > 0) {
+
+            $this->ensureInstitutionSamples();
 
             return ['success' => true, 'skipped' => 'already_has_instructors'];
 
@@ -369,6 +389,54 @@ class DatabaseSchemaService
         } catch (\Throwable $e) {
 
             Log::warning('AUTO_SEED_DEMO failed', ['error' => $e->getMessage()]);
+
+
+
+            return ['success' => false, 'error' => $e->getMessage()];
+
+        }
+
+    }
+
+
+
+    public function ensureInstitutionSamples(): array
+
+    {
+
+        if (!Schema::hasTable('platform_institutions')) {
+
+            return ['success' => true, 'skipped' => 'no_institution_table'];
+
+        }
+
+
+
+        if (\App\Models\PlatformInstitution::query()->count() > 0) {
+
+            return ['success' => true, 'skipped' => 'already_has_institutions'];
+
+        }
+
+
+
+        try {
+
+            Artisan::call('db:seed', [
+
+                '--class' => 'Database\\Seeders\\PlatformInstitutionSeeder',
+
+                '--force' => true,
+
+            ]);
+
+
+
+            return ['success' => true, 'seeded' => true, 'output' => trim(Artisan::output())];
+
+        } catch (\Throwable $e) {
+
+            Log::warning('AUTO_SEED institutions failed', ['error' => $e->getMessage()]);
 
 
 

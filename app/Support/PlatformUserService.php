@@ -3,304 +3,167 @@
 namespace App\Support;
 
 use App\Models\User;
-use Illuminate\Database\Eloquent\Model;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Schema;
 
 class PlatformUserService
 {
-    /** @var list<string> */
-    public const PLATFORM_EMAILS = [
-        'infos@parrotglobalstudyacademy.ca',
-        'instructor@parrotglobalstudyacademy.ca',
-        'staff@parrotglobalstudyacademy.ca',
-        'instructor2@parrotglobalstudyacademy.ca',
+    public const ADMIN_EMAIL = 'infos@parrotglobalstudyacademy.ca';
+
+    /** @var array<string, string> */
+    private const LEGACY_EMAIL_ALIASES = [
+        'info@xanderglobalscholars.com' => self::ADMIN_EMAIL,
+        'admin@parrot.com' => self::ADMIN_EMAIL,
     ];
 
     /** @var list<string> */
-    public const LEGACY_EMAILS = [
+    private const LEGACY_EMAILS_TO_DELETE = [
         'info@xanderglobalscholars.com',
         'admin@parrot.com',
-        'instructor@parrot.com',
-        'staff@parrot.com',
     ];
-
-    /** @var list<array{table: string, column: string}> */
-    private const USER_FOREIGN_KEYS = [
-        ['table' => 'meeting_registrations', 'column' => 'user_id'],
-        ['table' => 'livezoom_cohort', 'column' => 'created_by'],
-        ['table' => 'available_schedules', 'column' => 'created_by'],
-    ];
-
-    public static function normalizeEmail(string $email): string
-    {
-        return strtolower(trim($email));
-    }
-
-    /** @var array<string, string> Legacy logins → current platform email */
-    public const LOGIN_EMAIL_ALIASES = [
-        'info@xanderglobalscholars.com' => 'infos@parrotglobalstudyacademy.ca',
-        'admission@xanderglobalscholars.com' => 'infos@parrotglobalstudyacademy.ca',
-        'admin@parrot.com' => 'infos@parrotglobalstudyacademy.ca',
-    ];
-
-    public static function defaultPassword(): string
-    {
-        return self::seedPassword();
-    }
 
     public static function adminEmail(): string
     {
-        return (string) config('platform.admin_email', 'infos@parrotglobalstudyacademy.ca');
-    }
-
-    public static function resolveLoginEmail(string $email): string
-    {
-        $normalized = self::normalizeEmail($email);
-
-        return self::LOGIN_EMAIL_ALIASES[$normalized] ?? $normalized;
+        return self::ADMIN_EMAIL;
     }
 
     public static function seedPassword(): string
     {
-        $value = (string) config('platform.seed_password', config('platform.default_password', 'Parrot@2025'));
+        $fromEnv = env('SEED_PLATFORM_PASSWORD', '');
+        $plain = trim((string) $fromEnv, " \t\n\r\0\x0B'\"");
 
-        return trim($value, " \t\n\r\0\x0B'\"");
+        return $plain !== '' ? $plain : 'admin123';
     }
 
-    public static function storedPasswordHash(Model $record): string
+    public static function normalizeEmail(string $email): string
     {
-        if (method_exists($record, 'getRawOriginal')) {
-            $raw = $record->getRawOriginal('password');
-            if ($raw !== null && $raw !== '') {
-                return (string) $raw;
-            }
-        }
+        $normalized = strtolower(trim($email));
 
-        return (string) ($record->password ?? '');
+        return self::LEGACY_EMAIL_ALIASES[$normalized] ?? $normalized;
     }
 
-    public static function verifyPassword(Model $record, string $password, string $defaultPassword = '12345678'): bool
+    public static function verifyPassword(User $user, string $plain): bool
     {
-        $stored = self::storedPasswordHash($record);
+        $stored = (string) ($user->password ?? '');
 
         if ($stored === '') {
-            return hash_equals($defaultPassword, $password);
+            return hash_equals(self::seedPassword(), $plain);
         }
 
         if (password_get_info($stored)['algo'] !== 0) {
-            return password_verify($password, $stored);
+            return password_verify($plain, $stored);
         }
 
-        return hash_equals($stored, $password);
+        return hash_equals($stored, $plain);
+    }
+
+    public static function setUserPassword(User $user, string $plain): void
+    {
+        $user->password = trim($plain);
+        $user->save();
+    }
+
+    public static function resetPasswordForEmail(string $email, string $plain): void
+    {
+        $email = self::normalizeEmail($email);
+
+        User::query()
+            ->whereRaw('LOWER(TRIM(email)) = ?', [$email])
+            ->update(['password' => Hash::make($plain)]);
     }
 
     /**
-     * @return list<array{normalized_email: string, count: int}>
+     * Set the same bcrypt password on every login account (users, students, agents).
+     * For local/staging testing only.
+     *
+     * @return array{password: string, users: int, students: int, agents: int}
      */
-    public static function findNormalizedDuplicateGroups(): array
+    public static function resetAllPasswordsForTesting(?string $plain = null): array
     {
-        if (!Schema::hasTable('users')) {
-            return [];
+        $plain = trim((string) ($plain ?? self::seedPassword()), " \t\n\r\0\x0B'\"");
+        if ($plain === '') {
+            $plain = 'admin123';
         }
 
-        return DB::table('users')
-            ->selectRaw('LOWER(TRIM(email)) as normalized_email, COUNT(*) as count')
-            ->groupByRaw('LOWER(TRIM(email))')
-            ->havingRaw('COUNT(*) > 1')
-            ->orderBy('normalized_email')
-            ->get()
-            ->map(fn ($row) => [
-                'normalized_email' => (string) $row->normalized_email,
-                'count' => (int) $row->count,
-            ])
-            ->all();
-    }
+        $hash = Hash::make($plain);
+        $counts = ['users' => 0, 'students' => 0, 'agents' => 0];
 
-    public static function normalizeStoredEmails(): int
-    {
-        if (!Schema::hasTable('users')) {
-            return 0;
-        }
+        if (\Illuminate\Support\Facades\Schema::hasTable('users')) {
+            self::dedupeDuplicateEmails();
+            self::deleteLegacyEmails();
 
-        if (self::findNormalizedDuplicateGroups() !== []) {
-            return 0;
-        }
+            $counts['users'] = User::query()->update(['password' => $hash]);
 
-        $updated = 0;
-
-        foreach (User::query()->get(['id', 'email']) as $user) {
-            $normalized = self::normalizeEmail((string) $user->email);
-            if ($normalized === '' || $normalized === (string) $user->email) {
-                continue;
-            }
-
-            $conflict = DB::table('users')
-                ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
-                ->where('id', '!=', $user->id)
-                ->exists();
-
-            if ($conflict) {
-                continue;
-            }
-
-            DB::table('users')->where('id', $user->id)->update(['email' => $normalized]);
-            $updated++;
-        }
-
-        return $updated;
-    }
-
-    /**
-     * Remove duplicate users that share the same normalized email (keeps newest row).
-     */
-    public static function dedupeDuplicateEmails(): int
-    {
-        if (!Schema::hasTable('users')) {
-            return 0;
-        }
-
-        $removed = 0;
-
-        while (self::findNormalizedDuplicateGroups() !== []) {
-            foreach (self::findNormalizedDuplicateGroups() as $group) {
-                $normalized = $group['normalized_email'];
-
-                $rows = DB::table('users')
-                    ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
-                    ->orderByDesc('updated_at')
-                    ->orderByDesc('id')
-                    ->get();
-
-                $keeper = $rows->first();
-                if ($keeper === null) {
-                    continue;
-                }
-
-                foreach ($rows->slice(1) as $duplicate) {
-                    DB::transaction(function () use ($duplicate, $keeper, &$removed) {
-                        self::mergeUserReferences((int) $duplicate->id, (int) $keeper->id);
-                        DB::table('users')->where('id', $duplicate->id)->delete();
-                        $removed++;
-                    });
-                }
-
-                if ((string) $keeper->email !== $normalized) {
-                    DB::table('users')->where('id', $keeper->id)->update(['email' => $normalized]);
-                }
-            }
-        }
-
-        return $removed;
-    }
-
-    public static function deleteLegacyEmails(): int
-    {
-        if (!Schema::hasTable('users')) {
-            return 0;
-        }
-
-        return User::query()->whereIn('email', self::LEGACY_EMAILS)->delete();
-    }
-
-    public static function ensureUniqueEmailIndex(): void
-    {
-        if (!Schema::hasTable('users')) {
-            return;
-        }
-
-        $indexes = collect(DB::select('SHOW INDEX FROM users'))
-            ->filter(fn ($row) => ($row->Column_name ?? null) === 'email' && (int) ($row->Non_unique ?? 1) === 0);
-
-        if ($indexes->isNotEmpty()) {
-            return;
-        }
-
-        self::dedupeDuplicateEmails();
-
-        Schema::table('users', function ($table) {
-            $table->unique('email');
-        });
-    }
-
-    public static function resetPlatformUserPasswords(?string $plainPassword = null): int
-    {
-        $plainPassword = trim((string) ($plainPassword ?? self::seedPassword()), " \t\n\r\0\x0B'\"");
-        $hash = Hash::make($plainPassword);
-        $updated = 0;
-
-        foreach (self::PLATFORM_EMAILS as $email) {
-            $normalized = self::normalizeEmail($email);
-            $count = DB::table('users')
-                ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
-                ->update([
-                    'password' => $hash,
-                    'updated_at' => now(),
+            $adminEmail = self::adminEmail();
+            $admin = User::query()->whereRaw('LOWER(TRIM(email)) = ?', [$adminEmail])->first();
+            if (!$admin) {
+                User::create([
+                    'email' => $adminEmail,
+                    'name' => 'Parrot Canada Visa Consultant',
+                    'password' => $plain,
+                    'role' => 'admin',
+                    'status' => 'Active',
                 ]);
-
-            $updated += $count;
-        }
-
-        return $updated;
-    }
-
-    public static function resetPasswordForEmail(string $email, string $plainPassword): int
-    {
-        $normalized = self::normalizeEmail($email);
-        $hash = Hash::make(trim($plainPassword, " \t\n\r\0\x0B'\""));
-
-        return DB::table('users')
-            ->whereRaw('LOWER(TRIM(email)) = ?', [$normalized])
-            ->update([
-                'password' => $hash,
-                'updated_at' => now(),
-            ]);
-    }
-
-    private static function mergeUserReferences(int $fromUserId, int $toUserId): void
-    {
-        self::mergeAssignCours($fromUserId, $toUserId);
-
-        foreach (self::USER_FOREIGN_KEYS as $fk) {
-            if (!Schema::hasTable($fk['table']) || !Schema::hasColumn($fk['table'], $fk['column'])) {
-                continue;
+                $counts['users']++;
+            } else {
+                $admin->fill(['role' => 'admin', 'status' => 'Active']);
+                $admin->password = $plain;
+                $admin->save();
             }
-
-            DB::table($fk['table'])
-                ->where($fk['column'], $fromUserId)
-                ->update([$fk['column'] => $toUserId]);
         }
+
+        if (\Illuminate\Support\Facades\Schema::hasTable('students')) {
+            $counts['students'] = \App\Models\Student::query()->update(['password' => $hash]);
+        }
+
+        if (\Illuminate\Support\Facades\Schema::hasTable('agents')) {
+            $counts['agents'] = \App\Models\Agent::query()->update(['password' => $hash]);
+        }
+
+        return [
+            'password' => $plain,
+            'users' => $counts['users'],
+            'students' => $counts['students'],
+            'agents' => $counts['agents'],
+        ];
     }
 
-    /**
-     * assign_cours has UNIQUE(course_id, user_id) — drop rows the keeper already has.
-     */
-    private static function mergeAssignCours(int $fromUserId, int $toUserId): void
+    public static function dedupeDuplicateEmails(): void
     {
-        if (!Schema::hasTable('assign_cours')) {
+        if (!\Illuminate\Support\Facades\Schema::hasTable('users')) {
             return;
         }
 
-        $rows = DB::table('assign_cours')
-            ->where('user_id', $fromUserId)
-            ->get(['id', 'course_id']);
+        $seen = [];
 
-        foreach ($rows as $row) {
-            $keeperAlreadyAssigned = DB::table('assign_cours')
-                ->where('course_id', $row->course_id)
-                ->where('user_id', $toUserId)
-                ->exists();
+        User::query()
+            ->orderBy('id')
+            ->get(['id', 'email'])
+            ->each(function (User $user) use (&$seen) {
+                $key = strtolower(trim((string) $user->email));
+                if ($key === '') {
+                    return;
+                }
 
-            if ($keeperAlreadyAssigned) {
-                DB::table('assign_cours')->where('id', $row->id)->delete();
+                if (isset($seen[$key])) {
+                    $user->delete();
 
-                continue;
-            }
+                    return;
+                }
 
-            DB::table('assign_cours')
-                ->where('id', $row->id)
-                ->update(['user_id' => $toUserId]);
+                $seen[$key] = true;
+            });
+    }
+
+    public static function deleteLegacyEmails(): void
+    {
+        if (!\Illuminate\Support\Facades\Schema::hasTable('users')) {
+            return;
+        }
+
+        foreach (self::LEGACY_EMAILS_TO_DELETE as $legacy) {
+            User::query()
+                ->whereRaw('LOWER(TRIM(email)) = ?', [strtolower(trim($legacy))])
+                ->delete();
         }
     }
 }

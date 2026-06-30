@@ -27,6 +27,7 @@ use App\Services\ZoomService;
 use App\Support\CourseMaterialHelper;
 use App\Support\EnrollmentStatusHelper;
 use App\Support\LearnerRecordingAccess;
+use App\Support\QuizMaterialHelper;
 
 use Carbon\Carbon;
 
@@ -698,6 +699,42 @@ class LearnerDashboardController extends Controller
 
             ];
 
+        }
+
+        $recentQuizzes = CourseMaterial::query()
+            ->with('course:id,title')
+            ->whereIn('course_id', $paidCourseIds)
+            ->whereIn('type', ['quiz', 'assessment'])
+            ->orderByDesc('updated_at')
+            ->limit(30)
+            ->get()
+            ->filter(fn (CourseMaterial $material) => QuizMaterialHelper::isPublished($material));
+
+        foreach ($recentQuizzes as $material) {
+            $meta = QuizMaterialHelper::meta($material);
+            $publishedAt = $meta['published_at'] ?? $material->updated_at?->toIso8601String();
+            if ($publishedAt && \Carbon\Carbon::parse($publishedAt)->lt(now()->subDays(30))) {
+                continue;
+            }
+
+            $kind = (string) ($meta['assessment_kind'] ?? 'quiz');
+            $kindLabel = match ($kind) {
+                'exam' => 'Exam',
+                'test' => 'Test',
+                default => 'Quiz',
+            };
+
+            $notifications[] = [
+                'id' => 'assessment-' . $material->id,
+                'type' => 'assessment',
+                'title' => $kindLabel . ' available',
+                'message' => ($material->course?->title ?? 'Your course') . ': ' . ($material->title ?? 'Assessment'),
+                'created_at' => $publishedAt,
+                'course_id' => $material->course_id,
+                'material_id' => $material->id,
+                'quiz_id' => $material->id,
+                'action_path' => '/dashboard/learner/quiz/' . $material->id,
+            ];
         }
 
 

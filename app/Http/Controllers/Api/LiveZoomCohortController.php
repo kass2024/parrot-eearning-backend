@@ -12,6 +12,9 @@ use App\Services\LiveZoomCohortZoomService;
 use App\Services\ZoomMeetingSdkService;
 use App\Services\ZoomService;
 use App\Support\LiveZoomCohortHelper;
+use App\Support\PlatformInstitutionHelper;
+use App\Support\PlatformTenantScope;
+use App\Support\ZoomMeetingBrandingResolver;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
 use Carbon\Carbon;
@@ -24,12 +27,14 @@ class LiveZoomCohortController extends Controller
         protected LiveZoomCohortZoomService $zoomService,
         protected ZoomMeetingSdkService $meetingSdkService,
         protected ZoomService $zoomApi,
+        protected ZoomMeetingBrandingResolver $brandingResolver,
     ) {
     }
 
-    public function index()
+    public function index(Request $request)
     {
         $query = LiveZoomCohort::query();
+        PlatformTenantScope::applyToQuery($query, $request);
 
         if (Schema::hasColumn('livezoom_cohort', 'available_on_date')) {
             $query->orderByRaw('available_on_date IS NULL')
@@ -77,6 +82,7 @@ class LiveZoomCohortController extends Controller
         $isActive = array_key_exists('is_active', $data) ? (bool) $data['is_active'] : true;
         $notes = $data['notes'] ?? null;
         $userId = $request->user()?->id;
+        $tenantId = PlatformTenantScope::resolvePartnerTenantId($request);
 
         $created = 0;
         $updated = 0;
@@ -95,9 +101,13 @@ class LiveZoomCohortController extends Controller
                 $payload['session_status'] = 'idle';
             }
 
-            $existing = LiveZoomCohort::query()
-                ->where('available_on_date', $date)
-                ->first();
+            PlatformTenantScope::stampInstitutionId($request, $payload);
+
+            $existingQuery = LiveZoomCohort::query()->where('available_on_date', $date);
+            if ($tenantId !== null) {
+                $existingQuery->where('platform_institution_id', $tenantId);
+            }
+            $existing = $existingQuery->first();
 
             if ($existing) {
                 $existing->fill($payload);
@@ -153,6 +163,8 @@ class LiveZoomCohortController extends Controller
             $data['created_by'] = $request->user()->id;
         }
 
+        PlatformTenantScope::stampInstitutionId($request, $data);
+
         $slot = LiveZoomCohort::create($data);
 
         return response()->json([
@@ -163,6 +175,7 @@ class LiveZoomCohortController extends Controller
 
     public function update(Request $request, LiveZoomCohort $liveZoomCohort)
     {
+        $this->authorizeCohort($request, $liveZoomCohort);
         $data = $request->validate([
             'day_of_week' => 'sometimes|nullable|integer|min:0|max:6',
             'available_on_date' => 'sometimes|nullable|date_format:Y-m-d',
@@ -191,8 +204,9 @@ class LiveZoomCohortController extends Controller
         ], 200);
     }
 
-    public function destroy(LiveZoomCohort $liveZoomCohort)
+    public function destroy(Request $request, LiveZoomCohort $liveZoomCohort)
     {
+        $this->authorizeCohort($request, $liveZoomCohort);
         $liveZoomCohort->delete();
 
         return response()->json([
@@ -200,8 +214,9 @@ class LiveZoomCohortController extends Controller
         ], 200);
     }
 
-    public function startSession(LiveZoomCohort $liveZoomCohort)
+    public function startSession(Request $request, LiveZoomCohort $liveZoomCohort)
     {
+        $this->authorizeCohort($request, $liveZoomCohort);
         try {
             $this->assertZoomApiReady();
 
@@ -467,19 +482,17 @@ class LiveZoomCohortController extends Controller
                 $cohortTitle = 'Live Zoom Cohort #' . $liveZoomCohort->id;
             }
 
-            return response()->json([
+            $branding = $this->brandingResolver->resolve(null, null, $liveZoomCohort);
+
+            return response()->json(array_merge([
                 'sdk' => $payload,
                 'entry' => $entry,
                 'participant' => [
                     'name' => $displayName,
                     'avatar_url' => $avatarUrl,
                 ],
-                'host' => $this->resolveMeetingHostBranding(),
-                'company' => [
-                    'name' => (string) config('app.name', 'parrotglobalstudyacademy'),
-                ],
                 'cohort_title' => $cohortTitle,
-            ]);
+            ], $branding));
         } catch (\Throwable $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         }
@@ -507,12 +520,15 @@ class LiveZoomCohortController extends Controller
                 [$liveZoomCohort, $meetingDetails] = $this->zoomService->resolveCohortForSdkAuth($liveZoomCohort);
             }
 
+            if ($request->boolean('force_refresh') || $request->boolean('refresh_host_profile')) {
+                $this->zoomApi->invalidateHostUserCache();
+            }
+
             if (trim((string) ($liveZoomCohort->zoom_meeting_id ?? '')) === '') {
                 return response()->json(['message' => 'Start the cohort session first to create a Zoom meeting.'], 422);
             }
 
             $hostContext = $this->resolveHostContext($request);
-            $hostName = $hostContext['name'];
 
             $password = $this->zoomApi->resolveMeetingPassword(
                 $liveZoomCohort,
@@ -522,6 +538,31 @@ class LiveZoomCohortController extends Controller
                 $liveZoomCohort,
                 is_array($meetingDetails) ? $meetingDetails : null,
             );
+
+            $cohortTitle = trim((string) ($liveZoomCohort->notes ?? ''));
+            if ($cohortTitle === '') {
+                $cohortTitle = 'Live Zoom Cohort #' . $liveZoomCohort->id;
+            }
+
+            $actorEmail = PlatformTenantScope::resolveActorEmail($request) ?: $hostContext['email'];
+
+            $branding = $this->brandingResolver->resolve(
+                $actorEmail,
+                $liveZoomCohort->platform_institution_id ? (int) $liveZoomCohort->platform_institution_id : null,
+                $liveZoomCohort,
+            );
+            $branding['host']['email'] = $hostContext['email'];
+
+            $actorUser = $actorEmail
+                ? User::query()->whereRaw('LOWER(email) = ?', [strtolower(trim($actorEmail))])->first()
+                : null;
+            $branding = $this->brandingResolver->finalizeHostSdkBranding(
+                $branding,
+                $hostContext,
+                $actorUser,
+            );
+
+            $hostName = trim((string) ($branding['host']['name'] ?? $hostContext['name']));
 
             // Embedded Meeting SDK: same-account host uses role=1 JWT signature (no ZAK).
             $payload = $this->meetingSdkService->buildJoinPayload(
@@ -534,27 +575,15 @@ class LiveZoomCohortController extends Controller
             );
             $payload['password_candidates'] = $passwordCandidates;
 
-            $cohortTitle = trim((string) ($liveZoomCohort->notes ?? ''));
-            if ($cohortTitle === '') {
-                $cohortTitle = 'Live Zoom Cohort #' . $liveZoomCohort->id;
-            }
-
-            return response()->json([
+            return response()->json(array_merge([
                 'sdk' => $payload,
                 'queue' => $this->queueService->adminQueue($liveZoomCohort),
                 'meeting_id' => $liveZoomCohort->zoom_meeting_id,
                 'meeting_refreshed' => $request->boolean('force_refresh') || $request->boolean('meeting_stale'),
                 'zoom' => $this->zoomConfigurationPayload($liveZoomCohort),
-                'host' => [
-                    'name' => $hostName,
-                    'email' => $hostContext['email'],
-                    'avatar_url' => $hostContext['avatar_url'],
-                ],
-                'company' => [
-                    'name' => $hostContext['company_name'],
-                ],
+                'backend_app' => (string) config('app.name'),
                 'cohort_title' => $cohortTitle,
-            ]);
+            ], $branding));
         } catch (\Throwable $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         }
@@ -765,14 +794,7 @@ class LiveZoomCohortController extends Controller
      */
     protected function resolveMeetingHostBranding(): array
     {
-        $hostEmail = trim((string) config('services.zoom.host_user_id', ''));
-        $zoomHost = $this->zoomApi->resolveUserProfilePicture();
-
-        return [
-            'name' => (string) config('app.name', 'parrotglobalstudyacademy'),
-            'avatar_url' => $zoomHost,
-            'email' => str_contains($hostEmail, '@') ? $hostEmail : null,
-        ];
+        return $this->zoomApi->resolveConfiguredHostBranding();
     }
 
     /**
@@ -791,26 +813,26 @@ class LiveZoomCohortController extends Controller
             ? User::query()->where('email', $hostEmail)->first()
             : $request->user();
 
+        $zoomHost = $this->zoomApi->resolveConfiguredHostBranding();
+
+        $zoomName = trim((string) ($zoomHost['name'] ?? ''));
         $requestedName = trim((string) $request->input('host_name', ''));
-        $name = $requestedName;
+        // ZOOM_HOST_USER_ID profile always wins — not CMS login or stale localStorage names.
+        $name = $zoomName !== '' ? $zoomName : $requestedName;
         if ($name === '' || strcasecmp($name, 'Host') === 0) {
-            $name = $user ? (string) ($user->name ?? 'Host') : ($requestedName !== '' ? $requestedName : 'Host');
+            $name = $user ? (string) ($user->name ?? 'Host') : 'Host';
         }
 
-        $avatarUrl = null;
-        if ($user && !empty($user->avatar)) {
-            $avatarUrl = (string) $user->avatar;
-        }
-        if ($avatarUrl === null || trim($avatarUrl) === '') {
-            $avatarUrl = $this->zoomApi->resolveUserProfilePicture($user?->email ?: ($hostEmail !== '' ? $hostEmail : null))
-                ?? $this->zoomApi->resolveUserProfilePicture();
+        $email = $zoomHost['email'] ?? null;
+        if ($email === null || $email === '') {
+            $email = $hostEmail !== '' ? $hostEmail : $user?->email;
         }
 
         return [
             'name' => $name,
-            'email' => $user?->email,
-            'avatar_url' => $avatarUrl,
-            'company_name' => (string) config('app.name', 'parrotglobalstudyacademy'),
+            'email' => $email,
+            'avatar_url' => $zoomHost['avatar_url'],
+            'company_name' => $this->brandingResolver->platformCompanyNameForResponse(),
         ];
     }
 
@@ -865,5 +887,10 @@ class LiveZoomCohortController extends Controller
             'meeting_id' => $cohort->zoom_meeting_id,
             'meeting_number' => preg_replace('/\D+/', '', (string) ($cohort->zoom_meeting_id ?? '')) ?: null,
         ];
+    }
+
+    private function authorizeCohort(Request $request, LiveZoomCohort $liveZoomCohort): void
+    {
+        PlatformTenantScope::assertCanAccess($request, $liveZoomCohort);
     }
 }

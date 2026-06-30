@@ -18,6 +18,9 @@ class RepairStuckMigrations extends Command
         '2026_06_09_000002_quiz_phase2_embeddings_and_integrity' => [
             'quiz_material_analyses' => ['chunk_embeddings', 'embedding_model'],
         ],
+        '2026_06_09_200000_create_quiz_attempts_table' => [
+            'quiz_attempts' => ['marking_provider', 'tab_switch_count', 'integrity_flags', 'delivered_question_ids'],
+        ],
         '2026_06_09_140000_livezoom_cohort_queue' => [
             'livezoom_cohort' => ['session_status'],
             'livezoom_cohort_queue_entries' => ['id'],

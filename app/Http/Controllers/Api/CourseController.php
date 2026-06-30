@@ -22,6 +22,7 @@ use App\Services\MailDeliveryService;
 use App\Services\ZoomService;
 use App\Support\CourseDetailsHelper;
 use App\Support\EnrollmentStatusHelper;
+use App\Support\PlatformTenantScope;
 use App\Support\ResolvesEnrollmentStaff;
 use App\Services\CourseCodeGenerator;
 use Carbon\Carbon;
@@ -42,7 +43,20 @@ class CourseController extends Controller
     public function index(Request $request)
     {
         $programId = $request->query('program_id');
-        $cacheKey = $programId ? 'program_' . $programId : 'all';
+        $tenantId = PlatformTenantScope::resolveTenantId($request);
+        $cacheKey = ($tenantId ? 'inst_' . $tenantId . '_' : '') . ($programId ? 'program_' . $programId : 'all');
+
+        if ($tenantId !== null) {
+            $query = Course::with('program:id,name')
+                ->where('platform_institution_id', $tenantId)
+                ->orderByDesc('id');
+
+            if ($programId) {
+                $query->where('program_id', $programId);
+            }
+
+            return response()->json($query->get(), 200);
+        }
 
         $courses = ApiListCache::remember('courses', $cacheKey, 120, function () use ($programId) {
             $query = Course::with('program:id,name')
@@ -102,10 +116,19 @@ class CourseController extends Controller
             $payload['image'] = asset('storage/' . $path);
         }
 
+        PlatformTenantScope::stampInstitutionId($request, $payload);
+
         $instructor = User::findOrFail($data['instructor_id']);
         if ($instructor->role !== 'instructor') {
             return response()->json([
                 'message' => 'Selected user is not an instructor.',
+            ], 422);
+        }
+
+        $tenantId = PlatformTenantScope::resolvePartnerTenantId($request);
+        if ($tenantId !== null && (int) $instructor->platform_institution_id !== (int) $tenantId) {
+            return response()->json([
+                'message' => 'Instructor must belong to your institution.',
             ], 422);
         }
 
@@ -122,6 +145,7 @@ class CourseController extends Controller
 
     public function update(Request $request, Course $course)
     {
+        PlatformTenantScope::assertCanAccess($request, $course);
         $data = $request->validate(array_merge([
             'program_id' => 'sometimes|required|integer|exists:elearning_programs,id',
             'title' => 'sometimes|required|string|max:255',
@@ -158,8 +182,9 @@ class CourseController extends Controller
         ]);
     }
 
-    public function destroy(Course $course)
+    public function destroy(Request $request, Course $course)
     {
+        PlatformTenantScope::assertCanAccess($request, $course);
         $course->delete();
         $this->bumpCourseCaches();
 

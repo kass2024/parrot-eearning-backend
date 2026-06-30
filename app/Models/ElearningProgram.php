@@ -17,6 +17,7 @@ class ElearningProgram extends Model
         'image',
         'status',
         'sort_order',
+        'platform_institution_id',
     ];
 
     protected $casts = [

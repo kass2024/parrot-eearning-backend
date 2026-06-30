@@ -124,8 +124,25 @@ class CourseMaterialController extends Controller
             );
         }
 
+        $latestAttemptsByQuiz = [];
+        if ($studentId) {
+            $quizMaterialIds = $materials
+                ->filter(fn (CourseMaterial $m) => in_array($m->type, ['quiz', 'assessment'], true))
+                ->pluck('id');
+
+            if ($quizMaterialIds->isNotEmpty()) {
+                $latestAttemptsByQuiz = \App\Models\QuizAttempt::query()
+                    ->where('student_id', $studentId)
+                    ->whereIn('course_material_id', $quizMaterialIds)
+                    ->orderByDesc('id')
+                    ->get()
+                    ->unique('course_material_id')
+                    ->keyBy('course_material_id');
+            }
+        }
+
         return $materials
-            ->map(function (CourseMaterial $m) use ($liveMeetingIds, $recordingsByMeetingId) {
+            ->map(function (CourseMaterial $m) use ($liveMeetingIds, $recordingsByMeetingId, $latestAttemptsByQuiz) {
                 $arr = CourseMaterialHelper::toLearnerArray($m, $liveMeetingIds);
 
                 if (($arr['kind'] ?? '') === 'zoom') {
@@ -133,6 +150,11 @@ class CourseMaterialController extends Controller
                     $arr['recordings'] = ($meetingId && isset($recordingsByMeetingId[$meetingId]))
                         ? $recordingsByMeetingId[$meetingId]
                         : [];
+                }
+
+                $attempt = $latestAttemptsByQuiz[$m->id] ?? null;
+                if ($attempt instanceof \App\Models\QuizAttempt) {
+                    $arr['latest_attempt'] = $attempt->toLearnerSummary();
                 }
 
                 return $arr;
@@ -211,11 +233,21 @@ class CourseMaterialController extends Controller
      */
     public function prepareDirectUpload(Course $course, PCloudService $pcloud)
     {
-        return response()->json([
-            'message' => 'Direct browser upload to pCloud is disabled. Refresh the site (Ctrl+F5) or redeploy the latest frontend build.',
-            'upload_mode' => 'api',
-            'use_endpoint' => '/courses/' . $course->id . '/materials/upload-pcloud',
-        ], 410);
+        if (!$pcloud->isConfigured()) {
+            return response()->json([
+                'message' => 'pCloud is not configured. Set PCLOUD_ACCESS_TOKEN in the server .env file.',
+            ], 503);
+        }
+
+        try {
+            $pcloud->resolveApiHost();
+
+            return response()->json(
+                $pcloud->directUploadConfig($course->id, PCloudService::MATERIALS_SUBFOLDER, true)
+            );
+        } catch (\Throwable $e) {
+            return response()->json(['message' => $e->getMessage()], 502);
+        }
     }
 
     /**
@@ -283,7 +315,7 @@ class CourseMaterialController extends Controller
         try {
             $pcloud->resolveApiHost();
             $uploaded = $request->file('file');
-            $pcloudFile = $pcloud->uploadToCourse($course->id, $uploaded);
+            $pcloudFile = $pcloud->uploadToCourse($course->id, $uploaded, PCloudService::MATERIALS_SUBFOLDER);
 
             $material = $this->createMaterialFromPCloudFile(
                 $course,

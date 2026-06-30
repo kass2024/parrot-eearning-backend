@@ -9,6 +9,7 @@ class WebinarSetting extends Model
     protected $fillable = [
         'recording_enabled',
         'zoom_meeting_id',
+        'zoom_password',
         'zoom_join_url',
         'zoom_start_url',
         'zoom_scheduled_at',

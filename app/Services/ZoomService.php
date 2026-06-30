@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\CourseMaterial;
 use App\Models\LiveZoomCohort;
+use App\Models\WebinarSetting;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 
@@ -55,6 +56,7 @@ class ZoomService
         Cache::forget($this->hostUserCacheKey());
         Cache::forget('zoom_resolved_host_user_id_v1');
         Cache::forget($this->userProfilePictureCacheKey());
+        Cache::forget($this->configuredHostBrandingCacheKey());
     }
 
     protected function userProfilePictureCacheKey(?string $emailOrId = null): string
@@ -62,6 +64,101 @@ class ZoomService
         $key = strtolower(trim($emailOrId ?? $this->hostUserId()));
 
         return 'zoom_user_pic_url_v1_' . md5($key !== '' ? $key : '__default__');
+    }
+
+    protected function configuredHostBrandingCacheKey(): string
+    {
+        return 'zoom_host_brand_profile_v2_' . md5(strtolower(trim($this->hostUserId())));
+    }
+
+    /**
+     * Prefer Zoom legal name (first + last) over short display_name.
+     *
+     * @param  array<string, mixed>|null  $profile
+     */
+    public function resolveZoomProfileFullName(?array $profile): string
+    {
+        if (!is_array($profile)) {
+            return '';
+        }
+
+        $first = trim((string) ($profile['first_name'] ?? ''));
+        $last = trim((string) ($profile['last_name'] ?? ''));
+        $full = trim($first . ' ' . $last);
+        if ($full !== '') {
+            return $full;
+        }
+
+        return trim((string) ($profile['display_name'] ?? ''));
+    }
+
+    /**
+     * Branding for the Zoom meeting host from ZOOM_HOST_USER_ID (.env) — not the CMS login user.
+     *
+     * @return array{name: string, email: string|null, avatar_url: string|null}
+     */
+    public function resolveConfiguredHostBranding(): array
+    {
+        return Cache::remember($this->configuredHostBrandingCacheKey(), 3600, function () {
+            $configured = trim($this->hostUserId());
+            $profile = $this->fetchConfiguredZoomHostProfile();
+
+            $name = '';
+            $email = null;
+            $avatarUrl = null;
+
+            if (is_array($profile)) {
+                $name = $this->resolveZoomProfileFullName($profile);
+                $email = isset($profile['email']) ? trim((string) $profile['email']) : null;
+                if ($email === '') {
+                    $email = null;
+                }
+                $pic = trim((string) ($profile['pic_url'] ?? ''));
+                if ($pic !== '' && preg_match('#^https?://#i', $pic)) {
+                    $avatarUrl = $pic;
+                }
+            }
+
+            if ($email === null && str_contains($configured, '@')) {
+                $email = $configured;
+            }
+
+            return [
+                'name' => $name !== '' ? $name : (string) config('app.name', 'parrotglobalstudyacademy Learning'),
+                'email' => $email,
+                'avatar_url' => $avatarUrl,
+            ];
+        });
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    protected function fetchConfiguredZoomHostProfile(): ?array
+    {
+        $client = $this->client();
+        if (!$client) {
+            return null;
+        }
+
+        $configured = trim($this->hostUserId());
+        if ($configured === '' || $configured === 'me') {
+            return null;
+        }
+
+        $candidates = [$configured];
+        if (str_contains($configured, '@')) {
+            $candidates[] = strtolower($configured);
+        }
+
+        foreach (array_values(array_unique($candidates)) as $candidate) {
+            $response = $client->get('/users/' . rawurlencode($candidate));
+            if ($response->successful()) {
+                return $response->json();
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -108,6 +205,10 @@ class ZoomService
 
     public function resolveUserProfilePicture(?string $emailOrId = null): ?string
     {
+        if ($emailOrId === null || trim($emailOrId) === '') {
+            return $this->resolveConfiguredHostBranding()['avatar_url'];
+        }
+
         $cacheKey = $this->userProfilePictureCacheKey($emailOrId);
 
         return Cache::remember($cacheKey, 3600, function () use ($emailOrId) {
@@ -1303,6 +1404,48 @@ class ZoomService
         $candidates[] = '';
 
         return array_values(array_unique($candidates, SORT_STRING));
+    }
+
+    /**
+     * Password variants for Meeting Registration webinar (Meeting SDK join).
+     *
+     * @return list<string>
+     */
+    public function resolveWebinarJoinPasswordCandidates(WebinarSetting $settings, ?array $meetingDetails = null): array
+    {
+        $candidates = [];
+
+        $stored = trim((string) ($settings->zoom_password ?? ''));
+        if ($stored !== '') {
+            $candidates[] = $stored;
+        }
+
+        if (is_array($meetingDetails) && empty($meetingDetails['error'])) {
+            foreach (['password', 'passcode', 'h323_password', 'encrypted_password'] as $key) {
+                $value = $meetingDetails[$key] ?? null;
+                if (is_string($value) && trim($value) !== '') {
+                    $candidates[] = trim($value);
+                }
+            }
+        }
+
+        foreach ([$settings->zoom_join_url ?? null, $settings->zoom_start_url ?? null] as $url) {
+            $fromUrl = $this->extractPasswordFromJoinUrl(is_string($url) ? $url : null);
+            if ($fromUrl) {
+                $candidates[] = $fromUrl;
+            }
+        }
+
+        $candidates[] = '';
+
+        return array_values(array_unique($candidates, SORT_STRING));
+    }
+
+    public function resolveWebinarMeetingPassword(WebinarSetting $settings, ?array $meetingDetails = null): string
+    {
+        $candidates = $this->resolveWebinarJoinPasswordCandidates($settings, $meetingDetails);
+
+        return $candidates[0] ?? '';
     }
 
     public function resolveMaterialMeetingPassword(CourseMaterial $material, ?array $meetingDetails = null): string

@@ -13,17 +13,32 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use App\Services\StudentRegistrationEmailService;
 use App\Support\PlatformUserService;
+use App\Support\PlatformInstitutionHelper;
+use App\Models\PlatformInstitution;
 use Illuminate\Database\QueryException;
 
 class AuthController extends Controller
 {
     private function verifyPlainOrHashedPassword($record, string $password): bool
     {
-        if (!$record instanceof \Illuminate\Database\Eloquent\Model) {
+        if (!$record) {
             return false;
         }
 
-        return PlatformUserService::verifyPassword($record, $password);
+        $stored = (string) ($record->password ?? '');
+        $defaultPassword = '12345678';
+
+        // If no password set in DB, allow default only
+        if (empty($stored)) {
+            return $password === $defaultPassword;
+        }
+
+        // If hashed (bcrypt), attempt hash check; otherwise compare plain
+        if (password_get_info($stored)['algo'] !== 0) {
+            return password_verify($password, $stored);
+        }
+
+        return hash_equals($stored, $password);
     }
 
     private function resolveAccountByRole(string $role, string $email)
@@ -54,6 +69,7 @@ class AuthController extends Controller
             'primary_goal' => 'nullable|string',
             'selected_courses' => 'nullable|array',
             'selected_courses.*' => 'nullable|string|max:255',
+            'platform_institution_id' => 'nullable|integer|exists:platform_institutions,id',
         ]);
 
         try {
@@ -75,6 +91,20 @@ class AuthController extends Controller
             $student->primary_goal = $data['primary_goal'] ?? '';
             $plainPassword = $data['password'];
             $student->password = Hash::make($plainPassword);
+
+            $institutionId = $data['platform_institution_id'] ?? null;
+            if ($institutionId) {
+                $institution = PlatformInstitution::query()
+                    ->where('id', $institutionId)
+                    ->where('status', 'active')
+                    ->first();
+                if (!$institution) {
+                    DB::rollBack();
+                    return response()->json(['message' => 'Selected institution is not available.'], 422);
+                }
+                $student->platform_institution_id = $institution->id;
+            }
+
             $student->save();
 
             $selectedCourses = $data['selected_courses'] ?? [];
@@ -121,7 +151,7 @@ class AuthController extends Controller
             $user = User::create([
                 'name' => $data['name'],
                 'email' => $data['email'],
-                'password' => Hash::make($data['password']),
+                'password' => $data['password'],
                 'role' => 'instructor',
                 'status' => 'Pending',
                 'phone' => $data['phone'] ?? '',
@@ -151,36 +181,73 @@ class AuthController extends Controller
             'password' => 'required|string',
         ]);
 
-        $username = trim($data['username']);
-        $password = trim($data['password']);
-        $normalizedEmail = PlatformUserService::resolveLoginEmail($username);
-        $isEmailLogin = filter_var($normalizedEmail, FILTER_VALIDATE_EMAIL) !== false;
+        $username = PlatformUserService::normalizeEmail($data['username']);
+        $password = $data['password'];
 
-        // Platform staff (admin / instructor / staff) — check before students so duplicate emails do not block dashboard login.
+        $defaultPassword = '12345678';
+
+        // helper to verify: if password column is empty => accept default; else verify against stored password
+        $verify = function ($record) use ($password, $defaultPassword) {
+            if (!$record) return false;
+            $stored = $record->password ?? '';
+            // If no password set in DB, allow default only
+            if (empty($stored)) {
+                return $password === $defaultPassword;
+            }
+            // If hashed (bcrypt), attempt hash check; otherwise compare plain
+            if (password_get_info($stored)['algo'] !== 0) {
+                return password_verify($password, $stored);
+            }
+            return $stored === $password;
+        };
+
+        // Try Students table first (treated as learners)
         try {
-            $userCandidates = User::query()
-                ->when($isEmailLogin, function ($query) use ($normalizedEmail, $username) {
-                    $query->where(function ($inner) use ($normalizedEmail, $username) {
-                        $inner->whereRaw('LOWER(TRIM(email)) = ?', [$normalizedEmail])
-                            ->orWhere('name', $username);
-                    });
-                }, function ($query) use ($username) {
-                    $query->where('name', $username);
-                })
-                ->orderByDesc('updated_at')
-                ->orderByDesc('id')
-                ->get();
+            $student = Student::where('email', $username)
+                ->orWhere('first_name', $username)
+                ->orWhere('last_name', $username)
+                ->first();
+        } catch (QueryException $e) {
+            $student = null;
+        }
+
+        if ($student && $verify($student)) {
+            $studentStatus = strtolower(trim((string) ($student->status ?? 'active')));
+            if (in_array($studentStatus, ['pending', 'inactive', 'rejected'], true)) {
+                return response()->json([
+                    'message' => 'Your account is pending admin approval. You will be able to sign in once an administrator approves your registration.',
+                ], 403);
+            }
+
+            $institution = PlatformInstitutionHelper::resolveForStudent($student);
+            if ($institution && !PlatformInstitutionHelper::canLoginInstitution($institution)) {
+                return response()->json([
+                    'message' => 'Your institution account is not active. Please contact your institution administrator.',
+                ], 403);
+            }
+
+            return response()->json([
+                'message' => 'Login successful',
+                'role' => 'learner',
+                'user' => $student,
+                'institution' => PlatformInstitutionHelper::institutionPayload($institution),
+                'is_main_admin' => false,
+            ]);
+        }
+
+        // Users table (admin, staff, instructors, partners, etc.)
+        try {
+            $user = User::query()
+                ->whereRaw('LOWER(TRIM(email)) = ?', [$username])
+                ->orWhere('name', $username)
+                ->first();
         } catch (QueryException $e) {
             return response()->json([
                 'message' => 'Database schema error. Run: php artisan schema:rebuild-corrupted --seed --force',
             ], 503);
         }
 
-        foreach ($userCandidates as $user) {
-            if (!$this->verifyPlainOrHashedPassword($user, $password)) {
-                continue;
-            }
-
+        if ($user && PlatformUserService::verifyPassword($user, $password)) {
             $userStatus = strtolower(trim((string) ($user->status ?? 'active')));
             $userRole = strtolower(trim((string) ($user->role ?? 'admin')));
 
@@ -196,67 +263,46 @@ class AuthController extends Controller
                 ], 403);
             }
 
-            return response()->json([
-                'message' => 'Login successful',
-                'role' => $user->role ?? 'admin',
-                'user' => $user,
-            ]);
-        }
-
-        // Legacy agents table (instructors)
-        $agentCandidates = Agent::query()
-            ->when($isEmailLogin, function ($query) use ($normalizedEmail, $username) {
-                $query->where(function ($inner) use ($normalizedEmail, $username) {
-                    $inner->whereRaw('LOWER(TRIM(email)) = ?', [$normalizedEmail])
-                        ->orWhere('name', $username);
-                });
-            }, function ($query) use ($username) {
-                $query->where('name', $username);
-            })
-            ->orderByDesc('id')
-            ->get();
-
-        foreach ($agentCandidates as $agent) {
-            if ($this->verifyPlainOrHashedPassword($agent, $password)) {
+            $institution = PlatformInstitutionHelper::resolveForUser($user);
+            if ($userRole === 'partner_company') {
+                if (!$institution) {
+                    return response()->json(['message' => 'Partner institution not linked to this account.'], 403);
+                }
+                if ($institution->status === 'disabled') {
+                    return response()->json(['message' => 'Your institution has been disabled. Contact platform support.'], 403);
+                }
+                if ($institution->status === 'pending_approval') {
+                    return response()->json([
+                        'message' => 'Your institution registration is pending main admin approval.',
+                    ], 403);
+                }
+                if (PlatformInstitutionHelper::shouldBlockLoginForPayment($user, $institution)) {
+                    return response()->json([
+                        'message' => 'Your institution account has an outstanding payment. Check your email for the Stripe payment link.',
+                    ], 403);
+                }
+            } elseif ($institution && !PlatformInstitutionHelper::canLoginInstitution($institution)) {
                 return response()->json([
-                    'message' => 'Login successful',
-                    'role' => 'instructor',
-                    'user' => $agent,
-                ]);
-            }
-        }
-
-        // Learners (students table)
-        try {
-            $studentCandidates = Student::query()
-                ->when($isEmailLogin, function ($query) use ($normalizedEmail) {
-                    $query->whereRaw('LOWER(TRIM(email)) = ?', [$normalizedEmail]);
-                }, function ($query) use ($username) {
-                    $query->where('first_name', $username)
-                        ->orWhere('last_name', $username);
-                })
-                ->orderByDesc('id')
-                ->get();
-        } catch (QueryException $e) {
-            $studentCandidates = collect();
-        }
-
-        foreach ($studentCandidates as $student) {
-            if (!$this->verifyPlainOrHashedPassword($student, $password)) {
-                continue;
-            }
-
-            $studentStatus = strtolower(trim((string) ($student->status ?? 'active')));
-            if (in_array($studentStatus, ['pending', 'inactive', 'rejected'], true)) {
-                return response()->json([
-                    'message' => 'Your account is pending admin approval. You will be able to sign in once an administrator approves your registration.',
+                    'message' => 'Your institution account is not active. Please contact support.',
                 ], 403);
             }
 
             return response()->json([
                 'message' => 'Login successful',
-                'role' => 'learner',
-                'user' => $student,
+                'role' => $user->role ?? 'admin',
+                'user' => $user,
+                'institution' => PlatformInstitutionHelper::institutionPayload($institution),
+                'is_main_admin' => PlatformInstitutionHelper::isMainPlatformAdmin($user),
+            ]);
+        }
+
+        // Legacy agents table (instructors)
+        $agent = Agent::where('email', $username)->orWhere('name', $username)->first();
+        if ($agent && $verify($agent)) {
+            return response()->json([
+                'message' => 'Login successful',
+                'role' => 'instructor',
+                'user' => $agent,
             ]);
         }
 

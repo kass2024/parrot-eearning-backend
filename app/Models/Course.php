@@ -15,6 +15,7 @@ class Course extends Model
 
     protected $fillable = [
         'program_id',
+        'platform_institution_id',
         'title',
         'course_code',
         'description',

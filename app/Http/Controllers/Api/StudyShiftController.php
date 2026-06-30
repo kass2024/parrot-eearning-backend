@@ -7,6 +7,8 @@ use App\Models\Course;
 use App\Models\StudyShift;
 use App\Models\User;
 use App\Support\ApiListCache;
+use App\Support\PlatformInstitutionHelper;
+use App\Support\PlatformTenantScope;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
@@ -64,8 +66,17 @@ class StudyShiftController extends Controller
                 return response()->json(['message' => 'Email is required to manage study shifts.'], 401);
             }
 
-            if ($this->isAdmin($actor)) {
-                // Admin sees every shift (all instructors + platform-wide).
+            if ($this->isPlatformAdmin($actor)) {
+                // Platform admin sees every shift.
+            } elseif ($this->isPartnerAdmin($actor)) {
+                $tenantId = (int) $actor->platform_institution_id;
+                $courseIds = PlatformTenantScope::tenantCourseIds($tenantId);
+                $query->where(function ($q) use ($tenantId, $courseIds) {
+                    $q->where('platform_institution_id', $tenantId);
+                    if (!empty($courseIds)) {
+                        $q->orWhereIn('course_id', $courseIds);
+                    }
+                });
             } elseif ($this->isInstructor($actor)) {
                 $courseIds = $this->instructorCourseIds($actor);
                 $query->whereIn('course_id', $courseIds->isEmpty() ? [-1] : $courseIds);
@@ -114,7 +125,7 @@ class StudyShiftController extends Controller
             return response()->json(['message' => 'Email is required.'], 401);
         }
 
-        if (!$this->isAdmin($actor) && !$this->isInstructor($actor)) {
+        if (!$this->isPlatformAdmin($actor) && !$this->isPartnerAdmin($actor) && !$this->isInstructor($actor)) {
             return response()->json(['message' => 'You are not allowed to create study shifts.'], 403);
         }
 
@@ -279,7 +290,9 @@ class StudyShiftController extends Controller
             return $user;
         }
 
-        $email = $request->query('email')
+        $email = $request->input('user_email')
+            ?? $request->query('user_email')
+            ?? $request->query('email')
             ?? $request->input('email')
             ?? $request->header('X-User-Email');
 
@@ -290,9 +303,20 @@ class StudyShiftController extends Controller
         return User::query()->where('email', $email)->first();
     }
 
+    private function isPlatformAdmin(User $user): bool
+    {
+        return in_array(strtolower((string) $user->role), ['admin', 'superadmin', 'staff'], true)
+            && empty($user->platform_institution_id);
+    }
+
+    private function isPartnerAdmin(User $user): bool
+    {
+        return PlatformInstitutionHelper::isPartnerCompanyAdmin($user);
+    }
+
     private function isAdmin(User $user): bool
     {
-        return in_array(strtolower((string) $user->role), ['admin', 'superadmin', 'staff'], true);
+        return $this->isPlatformAdmin($user) || $this->isPartnerAdmin($user);
     }
 
     private function isInstructor(User $user): bool
