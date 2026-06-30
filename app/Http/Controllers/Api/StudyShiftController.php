@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Support\ApiListCache;
 use App\Support\PlatformInstitutionHelper;
 use App\Support\PlatformTenantScope;
+use App\Services\StudyShiftProvisioningService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
@@ -24,26 +25,39 @@ class StudyShiftController extends Controller
         6 => 'Saturday',
     ];
 
-    public function index(Request $request)
+    public function index(Request $request, StudyShiftProvisioningService $provisioning)
     {
         $courseId = $request->query('course_id');
         $activeOnly = $request->boolean('active_only', true);
         $manage = $request->boolean('manage');
+        $ensureDefaults = $request->boolean('ensure_defaults');
 
         if (!$manage && $courseId && $activeOnly && !$request->boolean('group_by_day')) {
-            $cacheKey = 'course_' . (int) $courseId . '_active';
-            $rows = ApiListCache::remember('study_shifts', $cacheKey, 120, function () use ($courseId) {
-                return StudyShift::query()
-                    ->with(['course:id,title'])
-                    ->withCount('enrollmentLinks')
-                    ->where('is_active', true)
-                    ->where(function ($q) use ($courseId) {
-                        $q->where('course_id', (int) $courseId)->orWhereNull('course_id');
-                    })
-                    ->orderBy('day_of_week')
-                    ->orderBy('start_time')
-                    ->get()
-                    ->map(fn (StudyShift $shift) => $this->serializeShift($shift, null));
+            $course = Course::find((int) $courseId);
+            if (!$course) {
+                return response()->json(['study_shifts' => []], 200);
+            }
+
+            $institutionId = $request->query('platform_institution_id');
+            $institutionId = $institutionId !== null && $institutionId !== ''
+                ? (int) $institutionId
+                : ($course->platform_institution_id ? (int) $course->platform_institution_id : null);
+
+            $cacheKey = 'course_' . (int) $courseId . '_active'
+                . ($institutionId ? '_inst_' . $institutionId : '')
+                . ($ensureDefaults ? '_ensure' : '');
+
+            $rows = ApiListCache::remember('study_shifts', $cacheKey, 120, function () use ($course, $institutionId, $ensureDefaults, $provisioning) {
+                $shifts = $provisioning->shiftsForCourseRegistration($course, $institutionId);
+
+                if ($shifts->isEmpty() && $ensureDefaults) {
+                    $shifts = $provisioning->ensureDefaultsForCourse($course);
+                }
+
+                return $shifts
+                    ->map(fn (StudyShift $shift) => $this->serializeShift($shift, null))
+                    ->values()
+                    ->all();
             });
 
             return response()->json(['study_shifts' => $rows], 200);
@@ -55,9 +69,9 @@ class StudyShiftController extends Controller
             ->orderBy('start_time');
 
         if ($manage) {
-            $query->with(['course:id,title', 'creator:id,name,email,role']);
+            $query->with(['course:id,title', 'courses:id,title', 'creator:id,name,email,role']);
         } else {
-            $query->with(['course:id,title']);
+            $query->with(['course:id,title', 'courses:id,title']);
         }
 
         if ($manage) {
@@ -74,20 +88,28 @@ class StudyShiftController extends Controller
                 $query->where(function ($q) use ($tenantId, $courseIds) {
                     $q->where('platform_institution_id', $tenantId);
                     if (!empty($courseIds)) {
-                        $q->orWhereIn('course_id', $courseIds);
+                        $q->orWhereIn('course_id', $courseIds)
+                            ->orWhereHas('courses', fn ($sub) => $sub->whereIn('courses.id', $courseIds));
                     }
                 });
             } elseif ($this->isInstructor($actor)) {
                 $courseIds = $this->instructorCourseIds($actor);
-                $query->whereIn('course_id', $courseIds->isEmpty() ? [-1] : $courseIds);
+                $ids = $courseIds->isEmpty() ? [-1] : $courseIds->all();
+                $query->where(function ($q) use ($ids) {
+                    $q->whereIn('course_id', $ids)
+                        ->orWhereHas('courses', fn ($sub) => $sub->whereIn('courses.id', $ids));
+                });
             } else {
                 return response()->json(['message' => 'You are not allowed to manage study shifts.'], 403);
             }
         }
 
         if ($courseId) {
-            $query->where(function ($q) use ($courseId) {
-                $q->where('course_id', (int) $courseId)->orWhereNull('course_id');
+            $cid = (int) $courseId;
+            $query->where(function ($q) use ($cid) {
+                $q->where('course_id', $cid)
+                    ->orWhereNull('course_id')
+                    ->orWhereHas('courses', fn ($sub) => $sub->where('courses.id', $cid));
             });
         }
 
@@ -118,7 +140,7 @@ class StudyShiftController extends Controller
         return response()->json(['study_shifts' => $rows], 200);
     }
 
-    public function store(Request $request)
+    public function store(Request $request, StudyShiftProvisioningService $provisioning)
     {
         $actor = $this->resolveActor($request);
         if (!$actor) {
@@ -130,17 +152,20 @@ class StudyShiftController extends Controller
         }
 
         $data = $this->validatedPayload($request, false, $actor);
+        $courseIds = $this->extractCourseIds($data);
         $days = $data['days_of_week'] ?? null;
-        unset($data['days_of_week']);
+        unset($data['days_of_week'], $data['course_ids']);
 
-        if ($this->isInstructor($actor) && empty($data['course_id'])) {
+        if ($this->isInstructor($actor) && $courseIds === []) {
             return response()->json([
-                'message' => 'Instructors must assign a study shift to one of their courses.',
+                'message' => 'Instructors must assign a study shift to at least one of their courses.',
             ], 422);
         }
 
-        if (!$this->canManageCourse($actor, $data['course_id'] ?? null)) {
-            return response()->json(['message' => 'You cannot manage study shifts for this course.'], 403);
+        foreach ($courseIds as $courseId) {
+            if (!$this->canManageCourse($actor, $courseId)) {
+                return response()->json(['message' => 'You cannot manage study shifts for one of the selected courses.'], 403);
+            }
         }
 
         $dayList = is_array($days) && count($days) > 0
@@ -152,6 +177,7 @@ class StudyShiftController extends Controller
         }
 
         unset($data['day_of_week']);
+        $data['course_id'] = $courseIds[0] ?? $data['course_id'] ?? null;
 
         $created = [];
         foreach ($dayList as $day) {
@@ -159,9 +185,11 @@ class StudyShiftController extends Controller
                 ...$data,
                 'day_of_week' => $day,
                 'created_by' => $actor->id,
+                'platform_institution_id' => $this->resolveShiftInstitutionId($data['course_id'] ?? null, $actor),
             ]);
-            $shift->load(['course:id,title', 'creator:id,name,email,role']);
-            $shift->loadCount('enrollments');
+            $provisioning->syncShiftCourses($shift, $courseIds);
+            $shift->load(['course:id,title', 'courses:id,title', 'creator:id,name,email,role']);
+            $shift->loadCount('enrollmentLinks');
             $created[] = $this->serializeShift($shift, $actor);
         }
 
@@ -176,7 +204,7 @@ class StudyShiftController extends Controller
         ], 201);
     }
 
-    public function update(Request $request, StudyShift $studyShift)
+    public function update(Request $request, StudyShift $studyShift, StudyShiftProvisioningService $provisioning)
     {
         $actor = $this->resolveActor($request);
         if (!$actor) {
@@ -188,14 +216,25 @@ class StudyShiftController extends Controller
         }
 
         $data = $this->validatedPayload($request, true, $actor);
+        $courseIds = $this->extractCourseIds($data, $studyShift);
+        unset($data['course_ids']);
 
-        if (array_key_exists('course_id', $data) && !$this->canManageCourse($actor, $data['course_id'])) {
+        foreach ($courseIds as $courseId) {
+            if (!$this->canManageCourse($actor, $courseId)) {
+                return response()->json(['message' => 'You cannot assign this shift to one of the selected courses.'], 403);
+            }
+        }
+
+        if (array_key_exists('course_id', $data) && $data['course_id'] && !$this->canManageCourse($actor, $data['course_id'])) {
             return response()->json(['message' => 'You cannot assign this shift to that course.'], 403);
         }
 
         $studyShift->update($data);
-        $studyShift->load(['course:id,title', 'creator:id,name,email,role']);
-        $studyShift->loadCount('enrollments');
+        if ($request->has('course_ids') || $request->has('course_id')) {
+            $provisioning->syncShiftCourses($studyShift, $courseIds);
+        }
+        $studyShift->load(['course:id,title', 'courses:id,title', 'creator:id,name,email,role']);
+        $studyShift->loadCount('enrollmentLinks');
 
         $this->bumpStudyShiftCaches();
 
@@ -227,6 +266,8 @@ class StudyShiftController extends Controller
     {
         $rules = [
             'course_id' => 'nullable|integer|exists:courses,id',
+            'course_ids' => 'nullable|array',
+            'course_ids.*' => 'integer|exists:courses,id',
             'name' => ($partial ? 'sometimes|' : '') . 'required|string|max:120',
             'day_of_week' => ($partial ? 'sometimes|' : '') . 'nullable|integer|min:0|max:6',
             'days_of_week' => ($partial ? 'sometimes|' : '') . 'nullable|array|min:1',
@@ -359,11 +400,41 @@ class StudyShiftController extends Controller
             return false;
         }
 
-        if (!$shift->course_id) {
-            return false;
+        $allowed = $this->instructorCourseIds($user);
+
+        if ($shift->course_id && $allowed->contains((int) $shift->course_id)) {
+            return true;
         }
 
-        return $this->instructorCourseIds($user)->contains((int) $shift->course_id);
+        return $shift->courses()
+            ->whereIn('courses.id', $allowed->isEmpty() ? [-1] : $allowed)
+            ->exists();
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @return array<int, int>
+     */
+    private function extractCourseIds(array $data, ?StudyShift $existing = null): array
+    {
+        if (array_key_exists('course_ids', $data)) {
+            return array_values(array_unique(array_filter(array_map('intval', $data['course_ids'] ?? []))));
+        }
+
+        if (array_key_exists('course_id', $data)) {
+            return $data['course_id'] ? [(int) $data['course_id']] : [];
+        }
+
+        if ($existing) {
+            $fromPivot = $existing->courses()->pluck('courses.id')->map(fn ($id) => (int) $id)->all();
+            if ($fromPivot !== []) {
+                return $fromPivot;
+            }
+
+            return $existing->course_id ? [(int) $existing->course_id] : [];
+        }
+
+        return [];
     }
 
     private function serializeShift(StudyShift $shift, ?User $actor = null): array
@@ -372,10 +443,32 @@ class StudyShiftController extends Controller
         $max = $shift->max_students;
         $creator = $shift->relationLoaded('creator') ? $shift->creator : null;
 
+        $linkedCourses = $shift->relationLoaded('courses')
+            ? $shift->courses
+            : $shift->courses()->get(['courses.id', 'courses.title']);
+
+        $courseIds = $linkedCourses->pluck('id')->map(fn ($id) => (int) $id)->values()->all();
+        if ($courseIds === [] && $shift->course_id) {
+            $courseIds = [(int) $shift->course_id];
+        }
+
+        $courseTitles = $linkedCourses->pluck('title')->filter()->values()->all();
+        if ($courseTitles === [] && $shift->course?->title) {
+            $courseTitles = [$shift->course->title];
+        }
+
+        $coursesPayload = $linkedCourses->map(fn (Course $c) => [
+            'id' => (int) $c->id,
+            'title' => $c->title,
+        ])->values()->all();
+
         return [
             'id' => $shift->id,
             'course_id' => $shift->course_id,
-            'course_title' => $shift->course?->title,
+            'course_ids' => $courseIds,
+            'courses' => $coursesPayload,
+            'course_title' => $courseTitles !== [] ? implode(', ', $courseTitles) : null,
+            'course_titles' => $courseTitles,
             'name' => $shift->name,
             'day_of_week' => (int) $shift->day_of_week,
             'day_label' => self::DAY_NAMES[(int) $shift->day_of_week] ?? 'Day',
@@ -405,5 +498,21 @@ class StudyShiftController extends Controller
     private function bumpStudyShiftCaches(): void
     {
         ApiListCache::bump('study_shifts');
+    }
+
+    private function resolveShiftInstitutionId(?int $courseId, User $actor): ?int
+    {
+        if ($courseId) {
+            $course = Course::find($courseId);
+            if ($course?->platform_institution_id) {
+                return (int) $course->platform_institution_id;
+            }
+        }
+
+        if (!empty($actor->platform_institution_id)) {
+            return (int) $actor->platform_institution_id;
+        }
+
+        return null;
     }
 }

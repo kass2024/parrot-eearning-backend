@@ -10,6 +10,11 @@ use Illuminate\Support\Collection;
 
 class EnrollmentStudyShiftService
 {
+    public function __construct(
+        private readonly StudyShiftProvisioningService $provisioning,
+    ) {
+    }
+
     public const DAY_NAMES = [
         0 => 'Sunday',
         1 => 'Monday',
@@ -33,12 +38,9 @@ class EnrollmentStudyShiftService
 
         if ($shiftIds === []) {
             if ($requireAtLeastOne) {
-                $hasShifts = StudyShift::query()
-                    ->where('is_active', true)
-                    ->where(function ($q) use ($course) {
-                        $q->where('course_id', $course->id)->orWhereNull('course_id');
-                    })
-                    ->exists();
+                $hasShifts = $this->provisioning
+                    ->shiftsForCourseRegistration($course, $course->platform_institution_id)
+                    ->isNotEmpty();
 
                 if ($hasShifts) {
                     return response()->json([
@@ -53,12 +55,13 @@ class EnrollmentStudyShiftService
         $shifts = StudyShift::query()
             ->whereIn('id', $shiftIds)
             ->where('is_active', true)
-            ->where(function ($q) use ($course) {
-                $q->where('course_id', $course->id)->orWhereNull('course_id');
-            })
             ->get();
 
-        if ($shifts->count() !== count($shiftIds)) {
+        $invalid = $shifts->filter(
+            fn (StudyShift $shift) => !$this->provisioning->shiftAppliesToCourse($shift, $course)
+        );
+
+        if ($invalid->isNotEmpty() || $shifts->count() !== count($shiftIds)) {
             return response()->json([
                 'message' => 'One or more selected study shifts are not available for this course.',
             ], 422);

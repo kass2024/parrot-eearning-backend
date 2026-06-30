@@ -10,6 +10,7 @@ class StudyShift extends Model
 {
     protected $fillable = [
         'course_id',
+        'platform_institution_id',
         'name',
         'day_of_week',
         'start_time',
@@ -30,6 +31,12 @@ class StudyShift extends Model
     public function course(): BelongsTo
     {
         return $this->belongsTo(Course::class);
+    }
+
+    public function courses()
+    {
+        return $this->belongsToMany(Course::class, 'course_study_shift', 'study_shift_id', 'course_id')
+            ->withTimestamps();
     }
 
     public function creator(): BelongsTo

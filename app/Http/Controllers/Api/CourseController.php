@@ -93,7 +93,6 @@ class CourseController extends Controller
             'duration' => 'nullable|string|max:255',
             'requirements' => 'nullable|string',
             'status' => 'nullable|string|max:50',
-            'instructor_id' => 'required|integer|exists:users,id',
             'image' => 'nullable',
         ], CourseDetailsHelper::validationRules()));
 
@@ -118,27 +117,12 @@ class CourseController extends Controller
 
         PlatformTenantScope::stampInstitutionId($request, $payload);
 
-        $instructor = User::findOrFail($data['instructor_id']);
-        if ($instructor->role !== 'instructor') {
-            return response()->json([
-                'message' => 'Selected user is not an instructor.',
-            ], 422);
-        }
-
-        $tenantId = PlatformTenantScope::resolvePartnerTenantId($request);
-        if ($tenantId !== null && (int) $instructor->platform_institution_id !== (int) $tenantId) {
-            return response()->json([
-                'message' => 'Instructor must belong to your institution.',
-            ], 422);
-        }
-
         $course = Course::create($payload);
-        $instructor->assignedCourses()->syncWithoutDetaching([$course->id]);
 
         $this->bumpCourseCaches();
 
         return response()->json([
-            'message' => 'Course created',
+            'message' => 'Course created. Assign an instructor from Courses or Instructor Management when ready.',
             'course' => $course->load('instructors:id,name,email'),
         ], 201);
     }
@@ -193,35 +177,58 @@ class CourseController extends Controller
 
     public function assignToUser(Request $request, Course $course)
     {
+        PlatformTenantScope::assertCanAccess($request, $course);
+
         $data = $request->validate([
             'user_id' => 'required|exists:users,id',
         ]);
 
         $user = User::findOrFail($data['user_id']);
+
+        if ($user->role !== 'instructor') {
+            return response()->json([
+                'message' => 'Selected user is not an instructor.',
+            ], 422);
+        }
+
+        $tenantId = PlatformTenantScope::resolvePartnerTenantId($request);
+        if ($tenantId !== null && (int) $user->platform_institution_id !== (int) $tenantId) {
+            return response()->json([
+                'message' => 'Instructor must belong to your institution.',
+            ], 422);
+        }
 
         $user->assignedCourses()->syncWithoutDetaching([$course->id]);
 
         $this->bumpCourseCaches();
 
         return response()->json([
-            'message' => 'Course assigned to user',
+            'message' => 'Course assigned to instructor',
         ]);
     }
 
     public function unassignFromUser(Request $request, Course $course)
     {
+        PlatformTenantScope::assertCanAccess($request, $course);
+
         $data = $request->validate([
             'user_id' => 'required|exists:users,id',
         ]);
 
         $user = User::findOrFail($data['user_id']);
 
+        if ($user->role !== 'instructor') {
+            return response()->json([
+                'message' => 'Selected user is not an instructor.',
+            ], 422);
+        }
+
         $user->assignedCourses()->detach($course->id);
 
         $this->bumpCourseCaches();
 
         return response()->json([
-            'message' => 'Course unassigned from user',
+            'message' => 'Course unassigned from instructor',
         ]);
     }
 
@@ -834,63 +841,9 @@ class CourseController extends Controller
      */
     private function resolveEnrollmentStudyShifts(Course $course, array $shiftIds)
     {
-        if ($shiftIds === []) {
-            $hasShifts = StudyShift::query()
-                ->where('is_active', true)
-                ->where(function ($q) use ($course) {
-                    $q->where('course_id', $course->id)->orWhereNull('course_id');
-                })
-                ->exists();
+        $service = app(\App\Services\EnrollmentStudyShiftService::class);
 
-            if ($hasShifts) {
-                return response()->json([
-                    'message' => 'Please select at least one study shift for this course.',
-                ], 422);
-            }
-
-            return [];
-        }
-
-        $shifts = StudyShift::query()
-            ->whereIn('id', $shiftIds)
-            ->where('is_active', true)
-            ->where(function ($q) use ($course) {
-                $q->where('course_id', $course->id)->orWhereNull('course_id');
-            })
-            ->withCount('enrollmentLinks')
-            ->get();
-
-        if ($shifts->count() !== count($shiftIds)) {
-            return response()->json([
-                'message' => 'One or more selected study shifts are not available for this course.',
-            ], 422);
-        }
-
-        $days = $shifts->pluck('day_of_week')->map(fn ($day) => (int) $day);
-        if ($days->count() !== $days->unique()->count()) {
-            return response()->json([
-                'message' => 'You can only select one shift per day.',
-            ], 422);
-        }
-
-        foreach ($shifts as $shift) {
-            if ($shift->max_students && $shift->enrollment_links_count >= $shift->max_students) {
-                $dayLabel = self::STUDY_SHIFT_DAY_NAMES[(int) $shift->day_of_week] ?? 'Day';
-
-                return response()->json([
-                    'message' => sprintf(
-                        'The %s shift on %s is full. Please choose another time.',
-                        $shift->name,
-                        $dayLabel
-                    ),
-                ], 422);
-            }
-        }
-
-        return $shifts->sortBy([
-            ['day_of_week', 'asc'],
-            ['start_time', 'asc'],
-        ])->values()->all();
+        return $service->resolveStudyShiftsForCourse($course, $shiftIds, null, true);
     }
 
     private function formatStudyShiftsForApi($shifts): array

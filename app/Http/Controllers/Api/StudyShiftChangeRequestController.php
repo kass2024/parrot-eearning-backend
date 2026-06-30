@@ -155,10 +155,12 @@ class StudyShiftChangeRequestController extends Controller
             return response()->json(['message' => 'Enrollment not found for this student and course.'], 404);
         }
 
-        $result = $this->shifts->syncEnrollmentStudyShifts(
+            $result = $this->shifts->syncEnrollmentStudyShifts(
             $enrollment,
             $data['study_shift_ids'],
-            StudyShift::query()->where('course_id', $course->id)->where('is_active', true)->exists()
+            app(\App\Services\StudyShiftProvisioningService::class)
+                ->shiftsForCourseRegistration($course, $course->platform_institution_id)
+                ->isNotEmpty()
                 && count($data['study_shift_ids']) === 0
         );
 

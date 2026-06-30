@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Models\CourseMaterial;
 use App\Models\CourseEnrollment;
 use App\Models\ElearningProgram;
+use App\Models\StudyShift;
 
 class Course extends Model
 {
@@ -61,5 +62,11 @@ class Course extends Model
     public function enrollments()
     {
         return $this->hasMany(CourseEnrollment::class);
+    }
+
+    public function studyShifts()
+    {
+        return $this->belongsToMany(StudyShift::class, 'course_study_shift', 'course_id', 'study_shift_id')
+            ->withTimestamps();
     }
 }
