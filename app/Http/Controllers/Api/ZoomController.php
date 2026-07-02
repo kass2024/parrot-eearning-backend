@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Services\MailDeliveryService;
 use App\Services\ZoomService;
 use App\Support\AdminRecordingCatalog;
+use App\Support\AdminZoomMeetingRegistry;
 use App\Support\FrontendUrl;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -34,10 +35,14 @@ class ZoomController extends Controller
             ], 200);
         }
 
-        $meetings = [];
+        $zoomMeetings = [];
         if (is_array($data) && isset($data['meetings']) && is_array($data['meetings'])) {
-            $meetings = $data['meetings'];
+            $zoomMeetings = $data['meetings'];
         }
+
+        $meetings = AdminZoomMeetingRegistry::meetingsForManagementPage($zoomMeetings);
+        $meetings = $this->zoom->annotateMeetingSessionStatuses($meetings, $this->zoom->hostUserId());
+        $meetings = $this->zoom->annotateMeetingRecordings($meetings);
 
         return response()->json(array_merge(is_array($data) ? $data : [], ['meetings' => $meetings]), 200);
     }
@@ -54,7 +59,8 @@ class ZoomController extends Controller
 
         $refresh = $request->boolean('refresh');
         $trackedIds = AdminRecordingCatalog::trackedMeetingIds();
-        $collected = $this->zoom->cachedCloudRecordings($trackedIds, 6, $refresh);
+        $monthsBack = 3;
+        $collected = $this->zoom->cachedCloudRecordings($trackedIds, $monthsBack, $refresh);
 
         $items = AdminRecordingCatalog::filterPlatformOnly(
             AdminRecordingCatalog::annotateItems(
@@ -160,6 +166,20 @@ class ZoomController extends Controller
             'timezone'   => 'nullable|string',
             'agenda'     => 'nullable|string',
             'invite_emails' => 'nullable|string',
+            'join_before_host' => 'nullable|boolean',
+            'mute_upon_entry' => 'nullable|boolean',
+            'auto_recording' => 'nullable|boolean',
+            'host_video' => 'nullable|boolean',
+            'participant_video' => 'nullable|boolean',
+            'waiting_room' => 'nullable|boolean',
+            'meeting_authentication' => 'nullable|boolean',
+            'registrants_email_notification' => 'nullable|boolean',
+            'allow_multiple_devices' => 'nullable|boolean',
+            'require_registration' => 'nullable|boolean',
+            'audio' => 'nullable|string|in:both,voip,telephony',
+            'type' => 'nullable|string|in:meeting,webinar',
+            'recurrence' => 'nullable|string|in:none,daily,weekly,monthly',
+            'reminder' => 'nullable|string|in:none,10m,1h,24h',
         ]);
 
         $payload = $request->all();
@@ -170,7 +190,10 @@ class ZoomController extends Controller
             ? (string) $user->email
             : (string) config('services.zoom.host_user_id', 'me');
 
-        $data = $this->zoom->createMeeting($payload, $hostId);
+        $isWebinar = strtolower((string) ($payload['type'] ?? 'meeting')) === 'webinar';
+        $data = $isWebinar
+            ? $this->zoom->createWebinar($payload, $hostId)
+            : $this->zoom->createMeeting($payload, $hostId);
         if ($data === null) {
             return response()->json(['message' => 'Unable to create meeting on Zoom (no response)'], 500);
         }
@@ -226,6 +249,8 @@ class ZoomController extends Controller
             }
         }
 
+        AdminZoomMeetingRegistry::register($data, $user?->id, $payload);
+
         // Include host details and explicit links in the response
         $responseBody = [
             'zoom' => $data,
@@ -245,6 +270,8 @@ class ZoomController extends Controller
             return response()->json(['message' => 'Unable to delete meeting on Zoom'], 500);
         }
 
+        AdminZoomMeetingRegistry::unregister($id);
+
         return response()->json(['message' => 'Meeting deleted on Zoom']);
     }
 
@@ -257,6 +284,7 @@ class ZoomController extends Controller
         $data = $request->validate([
             'recording_id' => 'nullable|string|max:255',
             'uuid' => 'nullable|string|max:500',
+            'start_time' => 'nullable|string|max:100',
         ]);
 
         $targetId = !empty($data['uuid']) ? (string) $data['uuid'] : $meetingId;
@@ -276,7 +304,13 @@ class ZoomController extends Controller
             ], $result['status'] ?? 502);
         }
 
-        $this->zoom->bumpRecordingsCacheVersion();
+        $this->zoom->purgeMeetingFromRecordingsCache(
+            $meetingId,
+            $data['uuid'] ?? null,
+            $data['start_time'] ?? null,
+            AdminRecordingCatalog::trackedMeetingIds(),
+            3
+        );
 
         return response()->json([
             'message' => $result['message'] ?? 'Recording deleted from Zoom cloud',

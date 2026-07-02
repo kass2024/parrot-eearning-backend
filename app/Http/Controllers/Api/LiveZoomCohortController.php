@@ -469,11 +469,21 @@ class LiveZoomCohortController extends Controller
             $password = $this->zoomApi->resolveMeetingPassword($liveZoomCohort, $meetingDetails);
             $passwordCandidates = $this->zoomApi->resolveJoinPasswordCandidates($liveZoomCohort, $meetingDetails);
 
+            $joinUserEmail = trim((string) ($participant['guest_email'] ?? '')) ?: null;
+            if (!$joinUserEmail && !empty($participant['student_id'])) {
+                $studentForEmail = Student::query()->find((int) $participant['student_id']);
+                if ($studentForEmail) {
+                    $joinUserEmail = trim((string) ($studentForEmail->email ?? '')) ?: null;
+                }
+            }
+
             $payload = $this->meetingSdkService->buildJoinPayload(
                 (string) $liveZoomCohort->zoom_meeting_id,
                 $displayName,
                 0,
                 $password,
+                null,
+                $joinUserEmail,
             );
             $payload['password_candidates'] = $passwordCandidates;
 

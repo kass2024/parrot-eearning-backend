@@ -213,6 +213,11 @@ Route::prefix('admin')->group(function () {
     Route::get('instructor/dashboard', [InstructorDashboardController::class, 'dashboard']);
     Route::get('instructor/live-classes', [InstructorDashboardController::class, 'liveClasses']);
     Route::post('instructor/live-classes/{material}/start', [InstructorDashboardController::class, 'startLiveSession']);
+    Route::get('instructor/live-classes/{material}/lobby', [InstructorDashboardController::class, 'liveClassLobby']);
+    Route::post('instructor/live-classes/{material}/lobby/dismiss', [InstructorDashboardController::class, 'dismissLobbyStudent']);
+    Route::post('instructor/live-classes/{material}/auto-admit', [InstructorDashboardController::class, 'setLiveClassAutoAdmit']);
+    Route::get('instructor/courses/{course}/enrolled-students', [InstructorDashboardController::class, 'courseEnrolledStudents']);
+    Route::post('instructor/live-classes/{material}/recording', [InstructorDashboardController::class, 'toggleLiveClassRecording']);
     Route::post('instructor/live-classes/{material}/sdk-auth', [ZoomEmbedController::class, 'instructorMaterialAuth']);
     Route::post('instructor/live-classes/{material}/preview-sdk-auth', [ZoomEmbedController::class, 'instructorPreviewMaterialAuth']);
     Route::get('instructor/students', [InstructorDashboardController::class, 'students']);

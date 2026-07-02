@@ -53,6 +53,48 @@ class ZoomService
         Cache::forget('zoom_access_token_v2');
     }
 
+    /**
+     * Fresh OAuth probe (bypasses cache) for diagnostics when scheduling fails.
+     *
+     * @return array{ok: bool, message: string|null, status?: int}
+     */
+    public function oauthConnectionStatus(): array
+    {
+        if (!$this->isConfigured()) {
+            return [
+                'ok' => false,
+                'message' => 'Set ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, and ZOOM_CLIENT_SECRET in .env, then run php artisan config:clear on the server.',
+            ];
+        }
+
+        $response = Http::asForm()
+            ->timeout(20)
+            ->withHeaders([
+                'Authorization' => 'Basic ' . base64_encode($this->clientId . ':' . $this->clientSecret),
+            ])
+            ->post('https://zoom.us/oauth/token', [
+                'grant_type' => 'account_credentials',
+                'account_id' => $this->accountId,
+            ]);
+
+        if ($response->failed() || !isset($response['access_token'])) {
+            $body = $response->json();
+            $reason = is_array($body) ? trim((string) ($body['reason'] ?? $body['error'] ?? '')) : '';
+            $message = is_array($body) ? trim((string) ($body['message'] ?? '')) : '';
+            $detail = trim($message . ($reason !== '' ? " ({$reason})" : ''));
+
+            return [
+                'ok' => false,
+                'message' => $detail !== ''
+                    ? "Zoom OAuth failed: {$detail}. Verify credentials in .env and run php artisan config:clear."
+                    : 'Zoom OAuth token unavailable. Verify ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, and ZOOM_CLIENT_SECRET, then run php artisan config:clear on the server.',
+                'status' => $response->status(),
+            ];
+        }
+
+        return ['ok' => true, 'message' => null];
+    }
+
     public function invalidateHostUserCache(): void
     {
         Cache::forget($this->hostUserCacheKey());
@@ -855,6 +897,8 @@ class ZoomService
             $headers['Content-Type'] = 'video/mp4';
         }
 
+        $headers['Content-Disposition'] = 'inline';
+
         return [
             'ok' => true,
             'status' => $response->status(),
@@ -1067,61 +1111,171 @@ class ZoomService
 
     public function createMeeting(array $data, string $userId = 'me'): ?array
     {
-        $client = $this->client();
-        if (!$client) {
+        if (!$this->client()) {
             return null;
         }
 
-        $startTime = null;
-        if (!empty($data['start_time'])) {
-            if ($data['start_time'] instanceof \DateTimeInterface) {
-                $startTime = $data['start_time']->format('Y-m-d\TH:i:s');
-            } else {
-                try {
-                    $dt = new \DateTime((string) $data['start_time']);
-                    $startTime = $dt->format('Y-m-d\TH:i:s');
-                } catch (\Throwable $e) {
-                    $startTime = (string) $data['start_time'];
-                }
-            }
-        }
-
-        $host = $userId ?: $this->hostUserId();
+        $startTime = $this->formatMeetingStartTime($data['start_time'] ?? null);
+        $recurrenceKey = strtolower(trim((string) ($data['recurrence'] ?? 'none')));
+        $recurrence = $this->buildRecurrencePayload($recurrenceKey, $startTime);
 
         $payload = [
-            'topic'      => $data['topic'] ?? 'Meeting',
-            'type'       => 2,
+            'topic' => $data['topic'] ?? 'Meeting',
+            'type' => $recurrence ? 8 : 2,
             'start_time' => $startTime,
-            'duration'   => $data['duration'] ?? 60,
-            'timezone'   => $data['timezone'] ?? 'UTC',
-            'agenda'     => $data['agenda'] ?? '',
-            // If a password is provided, pass it through to Zoom; otherwise Zoom can auto-generate one
-            'password'   => $data['password'] ?? null,
-            'settings'   => [
-                'join_before_host'              => (bool) ($data['join_before_host'] ?? false),
-                'waiting_room'                  => (bool) ($data['waiting_room'] ?? !($data['join_before_host'] ?? false)),
-                'mute_upon_entry'               => $data['mute_upon_entry'] ?? true,
-                'auto_recording'                => ($data['auto_recording'] ?? false) ? 'cloud' : 'none',
-                'host_video'                    => $data['host_video'] ?? true,
-                'participant_video'             => $data['participant_video'] ?? false,
-                'meeting_authentication'        => $data['meeting_authentication'] ?? false,
-                'registrants_email_notification'=> $data['registrants_email_notification'] ?? true,
-                'allow_multiple_devices'        => $data['allow_multiple_devices'] ?? false,
-                'audio'                         => $data['audio'] ?? 'both',
-            ],
+            'duration' => max(1, (int) ($data['duration'] ?? 60)),
+            'timezone' => $data['timezone'] ?? 'UTC',
+            'agenda' => $data['agenda'] ?? '',
+            'password' => $data['password'] ?? null,
+            'settings' => $this->buildMeetingSettings($data),
         ];
 
-        $response = $client->post('/users/' . rawurlencode($host) . '/meetings', $payload);
-
-        if ($response->failed()) {
-            return [
-                'error' => true,
-                'status' => $response->status(),
-                'body' => $response->json(),
-            ];
+        if ($recurrence) {
+            $payload['recurrence'] = $recurrence;
         }
 
-        return $response->json();
+        $result = $this->createMeetingForHost($payload, $userId);
+        if (is_array($result) && !empty($result['error'])) {
+            return $result;
+        }
+
+        return $result;
+    }
+
+    protected function formatMeetingStartTime(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if ($value instanceof \DateTimeInterface) {
+            return $value->format('Y-m-d\TH:i:s');
+        }
+
+        try {
+            return (new \DateTime((string) $value))->format('Y-m-d\TH:i:s');
+        } catch (\Throwable) {
+            return (string) $value;
+        }
+    }
+
+    protected function toBool(mixed $value, bool $default = false): bool
+    {
+        if ($value === null) {
+            return $default;
+        }
+
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if (is_int($value) || is_float($value)) {
+            return (bool) $value;
+        }
+
+        $normalized = strtolower(trim((string) $value));
+        if (in_array($normalized, ['1', 'true', 'yes', 'on'], true)) {
+            return true;
+        }
+
+        if (in_array($normalized, ['0', 'false', 'no', 'off', ''], true)) {
+            return false;
+        }
+
+        return $default;
+    }
+
+    protected function normalizeMeetingAudio(mixed $audio): string
+    {
+        $audio = strtolower(trim((string) $audio));
+
+        return in_array($audio, ['both', 'voip', 'telephony'], true) ? $audio : 'both';
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    protected function buildMeetingSettings(array $data): array
+    {
+        $requireRegistration = $this->toBool($data['require_registration'] ?? false);
+        $joinBeforeHost = $this->toBool($data['join_before_host'] ?? false);
+        $waitingRoom = array_key_exists('waiting_room', $data)
+            ? $this->toBool($data['waiting_room'])
+            : !$joinBeforeHost;
+
+        $settings = [
+            'join_before_host' => $joinBeforeHost,
+            'waiting_room' => $waitingRoom,
+            'mute_upon_entry' => $this->toBool($data['mute_upon_entry'] ?? false),
+            'auto_recording' => $this->toBool($data['auto_recording'] ?? false) ? 'cloud' : 'none',
+            'host_video' => $this->toBool($data['host_video'] ?? true),
+            'participant_video' => $this->toBool($data['participant_video'] ?? false),
+            'meeting_authentication' => $this->toBool($data['meeting_authentication'] ?? false),
+            'registrants_email_notification' => $this->toBool($data['registrants_email_notification'] ?? true),
+            'allow_multiple_devices' => $this->toBool($data['allow_multiple_devices'] ?? false),
+            'audio' => $this->normalizeMeetingAudio($data['audio'] ?? 'both'),
+            'approval_type' => $requireRegistration ? 0 : 2,
+        ];
+
+        if ($requireRegistration) {
+            $settings['registration_type'] = 1;
+        }
+
+        return $settings;
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    protected function buildRecurrencePayload(string $recurrence, ?string $startTime): ?array
+    {
+        if ($recurrence === '' || $recurrence === 'none') {
+            return null;
+        }
+
+        $base = [
+            'repeat_interval' => 1,
+            'end_times' => 12,
+        ];
+
+        if ($recurrence === 'daily') {
+            return array_merge($base, ['type' => 1]);
+        }
+
+        if ($recurrence === 'weekly') {
+            $weeklyDay = '2';
+            if ($startTime) {
+                try {
+                    $weeklyDay = (string) ((int) \Carbon\Carbon::parse($startTime)->dayOfWeek + 1);
+                } catch (\Throwable) {
+                    $weeklyDay = '2';
+                }
+            }
+
+            return array_merge($base, [
+                'type' => 2,
+                'weekly_days' => $weeklyDay,
+            ]);
+        }
+
+        if ($recurrence === 'monthly') {
+            $monthlyDay = 1;
+            if ($startTime) {
+                try {
+                    $monthlyDay = (int) \Carbon\Carbon::parse($startTime)->day;
+                } catch (\Throwable) {
+                    $monthlyDay = 1;
+                }
+            }
+
+            return array_merge($base, [
+                'type' => 3,
+                'monthly_day' => max(1, min(31, $monthlyDay)),
+            ]);
+        }
+
+        return null;
     }
 
     public function deleteMeeting(string $meetingId): bool
@@ -1231,6 +1385,222 @@ class ZoomService
     }
 
     /**
+     * Session status for scheduled Zoom meetings on the admin Zoom Management page.
+     *
+     * @param  array<string, mixed>  $meeting
+     * @param  list<string>  $liveMeetingIds
+     */
+    public function scheduledMeetingSessionStatus(array $meeting, array $liveMeetingIds = []): string
+    {
+        $meetingId = trim((string) ($meeting['id'] ?? ''));
+        $liveMeetingIds = array_map('strval', $liveMeetingIds);
+
+        if ($meetingId !== '' && in_array($meetingId, $liveMeetingIds, true)) {
+            return 'live';
+        }
+
+        $startRaw = $meeting['start_time'] ?? null;
+        if ($startRaw === null || $startRaw === '') {
+            return 'unknown';
+        }
+
+        try {
+            $start = \Carbon\Carbon::parse((string) $startRaw);
+        } catch (\Throwable) {
+            return 'unknown';
+        }
+
+        $duration = (int) ($meeting['duration'] ?? 60);
+        if ($duration <= 0) {
+            $duration = 60;
+        }
+
+        $end = $start->copy()->addMinutes($duration);
+        $now = now();
+
+        if ($now->gt($end)) {
+            return 'ended';
+        }
+
+        if ($now->lt($start)) {
+            return 'upcoming';
+        }
+
+        return 'upcoming';
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $meetings
+     * @return list<array<string, mixed>>
+     */
+    public function annotateMeetingSessionStatuses(array $meetings, ?string $hostUserId = null): array
+    {
+        $host = $hostUserId ?: $this->hostUserId();
+        $liveMeetingIds = $this->fetchLiveMeetingIds($host);
+
+        return array_map(function ($meeting) use ($liveMeetingIds) {
+            if (!is_array($meeting)) {
+                return $meeting;
+            }
+
+            $meeting['session_status'] = $this->scheduledMeetingSessionStatus($meeting, $liveMeetingIds);
+
+            return $meeting;
+        }, $meetings);
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $meetings
+     * @return list<array<string, mixed>>
+     */
+    public function annotateMeetingRecordings(array $meetings): array
+    {
+        $meetingIds = [];
+        foreach ($meetings as $meeting) {
+            if (!is_array($meeting)) {
+                continue;
+            }
+            $id = trim((string) ($meeting['id'] ?? ''));
+            if ($id !== '') {
+                $meetingIds[] = $id;
+            }
+        }
+
+        if ($meetingIds === []) {
+            return $meetings;
+        }
+
+        $collected = $this->cachedCloudRecordings($meetingIds, 3, false);
+        $sessionsByMeetingId = [];
+        foreach (($collected['meetings'] ?? []) as $recording) {
+            if (!is_array($recording)) {
+                continue;
+            }
+            $id = trim((string) ($recording['id'] ?? ''));
+            if ($id === '') {
+                continue;
+            }
+            $sessionsByMeetingId[$id][] = $recording;
+        }
+
+        return array_map(function ($meeting) use ($sessionsByMeetingId) {
+            if (!is_array($meeting)) {
+                return $meeting;
+            }
+
+            $id = trim((string) ($meeting['id'] ?? ''));
+            $meeting['recording_available'] = false;
+            $meeting['recording_play_url'] = null;
+            $meeting['recording_download_url'] = null;
+
+            if ($id === '' || empty($sessionsByMeetingId[$id])) {
+                return $meeting;
+            }
+
+            $session = $this->pickRecordingSession($sessionsByMeetingId[$id], $meeting['start_time'] ?? null);
+            $bestFile = $session ? $this->bestMp4FileFromRecording($session) : null;
+            if ($bestFile === null) {
+                return $meeting;
+            }
+
+            $recordingFiles = [];
+            foreach (($session['recording_files'] ?? []) as $file) {
+                if (!is_array($file)) {
+                    continue;
+                }
+                $recordingFiles[] = $file;
+            }
+            $playableFiles = $this->filterPlayableRecordingFiles($recordingFiles);
+
+            $meeting['recording_available'] = true;
+            $meeting['recording_play_url'] = $bestFile['play_url'] ?? null;
+            $meeting['recording_download_url'] = $bestFile['download_url'] ?? null;
+            $meeting['recording_files'] = array_map(function (array $file) {
+                return [
+                    'id' => $file['id'] ?? null,
+                    'recording_type' => $file['recording_type'] ?? null,
+                    'file_type' => $file['file_type'] ?? null,
+                    'play_url' => $file['play_url'] ?? null,
+                    'download_url' => $file['download_url'] ?? null,
+                    'view_label' => $file['view_label'] ?? null,
+                ];
+            }, $playableFiles);
+
+            return $meeting;
+        }, $meetings);
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $sessions
+     * @return array<string, mixed>|null
+     */
+    protected function pickRecordingSession(array $sessions, mixed $startTime): ?array
+    {
+        if ($sessions === []) {
+            return null;
+        }
+
+        if (count($sessions) === 1) {
+            return $sessions[0];
+        }
+
+        if ($startTime === null || $startTime === '') {
+            return $sessions[0];
+        }
+
+        try {
+            $target = \Carbon\Carbon::parse((string) $startTime);
+        } catch (\Throwable) {
+            return $sessions[0];
+        }
+
+        $best = null;
+        $bestDiff = PHP_INT_MAX;
+        foreach ($sessions as $session) {
+            if (!is_array($session) || empty($session['start_time'])) {
+                continue;
+            }
+
+            try {
+                $sessionStart = \Carbon\Carbon::parse((string) $session['start_time']);
+            } catch (\Throwable) {
+                continue;
+            }
+
+            $diff = abs($target->diffInSeconds($sessionStart));
+            if ($diff < $bestDiff) {
+                $bestDiff = $diff;
+                $best = $session;
+            }
+        }
+
+        return $best ?? $sessions[0];
+    }
+
+    /**
+     * @param  array<string, mixed>  $recordingMeeting
+     * @return array<string, mixed>|null
+     */
+    protected function bestMp4FileFromRecording(array $recordingMeeting): ?array
+    {
+        $files = [];
+        foreach (($recordingMeeting['recording_files'] ?? []) as $file) {
+            if (is_array($file)) {
+                $files[] = $file;
+            }
+        }
+
+        $playable = $this->filterPlayableRecordingFiles($files);
+        foreach ($playable as $file) {
+            if (strtoupper((string) ($file['file_type'] ?? '')) === 'MP4') {
+                return $file;
+            }
+        }
+
+        return $playable[0] ?? null;
+    }
+
+    /**
      * @param  array<string, mixed>  $details
      */
     public function isMeetingJoinableForEmbed(array $details): bool
@@ -1296,23 +1666,34 @@ class ZoomService
             return null;
         }
 
+        $host = $userId ?: $this->hostUserId();
+        $settings = $this->buildMeetingSettings($data);
+
         $payload = [
-            'topic'      => $data['topic'] ?? 'Webinar',
-            'type'       => 5,
-            'start_time' => $data['start_time'] ?? null,
-            'duration'   => $data['duration'] ?? 60,
-            'timezone'   => $data['timezone'] ?? 'UTC',
-            'agenda'     => $data['agenda'] ?? '',
-            'settings'   => [
-                'host_video'       => $data['host_video'] ?? true,
-                'panelists_video'  => $data['panelists_video'] ?? true,
-                'practice_session' => $data['practice_session'] ?? true,
-                'hd_video'         => $data['hd_video'] ?? true,
-                'auto_recording'   => ($data['auto_recording'] ?? false) ? 'cloud' : 'none',
-            ],
+            'topic' => $data['topic'] ?? 'Webinar',
+            'type' => 5,
+            'start_time' => $this->formatMeetingStartTime($data['start_time'] ?? null),
+            'duration' => max(1, (int) ($data['duration'] ?? 60)),
+            'timezone' => $data['timezone'] ?? 'UTC',
+            'agenda' => $data['agenda'] ?? '',
+            'settings' => array_merge($settings, [
+                'panelists_video' => $this->toBool($data['panelists_video'] ?? $data['participant_video'] ?? true),
+                'practice_session' => $this->toBool($data['practice_session'] ?? true),
+                'hd_video' => $this->toBool($data['hd_video'] ?? true),
+            ]),
         ];
 
-        return $client->post("/users/{$userId}/webinars", $payload)->json();
+        $response = $client->post('/users/' . rawurlencode($host) . '/webinars', $payload);
+
+        if ($response->failed()) {
+            return [
+                'error' => true,
+                'status' => $response->status(),
+                'body' => $response->json(),
+            ];
+        }
+
+        return $response->json();
     }
 
     public function extractMeetingIdFromJoinUrl(?string $url): ?string
@@ -1673,19 +2054,17 @@ class ZoomService
      */
     public function cachedCloudRecordings(array $meetingIds = [], int $monthsBack = 6, bool $refresh = false): array
     {
-        if ($refresh) {
-            $this->bumpRecordingsCacheVersion();
-        }
-
         $ids = array_values(array_unique(array_filter(array_map('strval', $meetingIds))));
         sort($ids);
         $cacheKey = $this->recordingsCacheKey($monthsBack, $ids);
 
-        $cached = Cache::get($cacheKey);
-        if (is_array($cached)) {
-            $cached['cached'] = true;
+        if (!$refresh) {
+            $cached = Cache::get($cacheKey);
+            if (is_array($cached)) {
+                $cached['cached'] = true;
 
-            return $cached;
+                return $cached;
+            }
         }
 
         try {
@@ -1699,9 +2078,58 @@ class ZoomService
             ];
         }
         $collected['cached'] = false;
-        Cache::put($cacheKey, $collected, now()->addMinutes(5));
+        Cache::put($cacheKey, $collected, now()->addMinutes(15));
 
         return $collected;
+    }
+
+    /**
+     * Remove a deleted meeting from the recordings cache without a full Zoom refetch.
+     *
+     * @param  list<string>  $meetingIds
+     */
+    public function purgeMeetingFromRecordingsCache(
+        string $meetingId,
+        ?string $uuid = null,
+        ?string $startTime = null,
+        array $meetingIds = [],
+        int $monthsBack = 6
+    ): void {
+        $ids = array_values(array_unique(array_filter(array_map('strval', $meetingIds))));
+        sort($ids);
+        $cacheKey = $this->recordingsCacheKey($monthsBack, $ids);
+        $cached = Cache::get($cacheKey);
+
+        if (!is_array($cached) || empty($cached['meetings']) || !is_array($cached['meetings'])) {
+            return;
+        }
+
+        $cached['meetings'] = array_values(array_filter($cached['meetings'], function ($meeting) use ($meetingId, $uuid, $startTime) {
+            if (!is_array($meeting)) {
+                return true;
+            }
+
+            $id = (string) ($meeting['id'] ?? '');
+            $meetingUuid = (string) ($meeting['uuid'] ?? '');
+            $meetingStart = (string) ($meeting['start_time'] ?? '');
+
+            if ($uuid !== null && $uuid !== '') {
+                return $meetingUuid !== $uuid;
+            }
+
+            $matchesMeeting = $id === $meetingId || $meetingUuid === $meetingId;
+            if (!$matchesMeeting) {
+                return true;
+            }
+
+            if ($startTime !== null && $startTime !== '' && $meetingStart !== '') {
+                return $meetingStart !== $startTime;
+            }
+
+            return false;
+        }));
+
+        Cache::put($cacheKey, $cached, now()->addMinutes(15));
     }
 
     public function bumpRecordingsCacheVersion(): void

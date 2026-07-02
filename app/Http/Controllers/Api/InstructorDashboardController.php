@@ -14,14 +14,17 @@ use App\Support\CourseMaterialHelper;
 use App\Support\QuizMaterialHelper;
 use App\Support\CourseDetailsHelper;
 use App\Support\CourseRevenueCalculator;
+use App\Services\LiveClassLobbyService;
 use App\Services\ZoomService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 
 class InstructorDashboardController extends Controller
 {
-    public function __construct(protected ZoomService $zoom)
-    {
+    public function __construct(
+        protected ZoomService $zoom,
+        protected LiveClassLobbyService $lobbyService,
+    ) {
     }
 
     private function sharePercent(): float
@@ -35,6 +38,46 @@ class InstructorDashboardController extends Controller
             ->where('email', $email)
             ->where('role', 'instructor')
             ->first();
+    }
+
+    private function findLiveClassHost(string $email): ?User
+    {
+        return User::query()
+            ->whereRaw('LOWER(TRIM(email)) = ?', [strtolower(trim($email))])
+            ->whereIn('role', ['instructor', 'admin', 'staff'])
+            ->first();
+    }
+
+    private function canHostMaterial(User $user, CourseMaterial $material): bool
+    {
+        $role = strtolower(trim((string) ($user->role ?? '')));
+        if (in_array($role, ['admin', 'staff'], true)) {
+            return true;
+        }
+
+        if ($role !== 'instructor') {
+            return false;
+        }
+
+        return $this->courseIdsFor($user)->contains($material->course_id);
+    }
+
+    private function canHostCourse(User $user, ?Course $course): bool
+    {
+        if (!$course) {
+            return false;
+        }
+
+        $role = strtolower(trim((string) ($user->role ?? '')));
+        if (in_array($role, ['admin', 'staff'], true)) {
+            return true;
+        }
+
+        if ($role !== 'instructor') {
+            return false;
+        }
+
+        return $this->courseIdsFor($user)->contains($course->id);
     }
 
     private function courseIdsFor(User $instructor)
@@ -358,7 +401,7 @@ class InstructorDashboardController extends Controller
             'enable_recording' => 'nullable|boolean',
         ]);
 
-        $instructor = $this->findInstructor($data['instructor_email']);
+        $instructor = $this->findLiveClassHost($data['instructor_email']);
         if (!$instructor) {
             return response()->json(['message' => 'Instructor not found'], 404);
         }
@@ -367,45 +410,279 @@ class InstructorDashboardController extends Controller
             return response()->json(['message' => 'This material is not a live class session.'], 422);
         }
 
-        $courseIds = $this->courseIdsFor($instructor);
-        if (!$courseIds->contains($material->course_id)) {
+        if (!$this->canHostMaterial($instructor, $material)) {
             return response()->json(['message' => 'You are not assigned to this course.'], 403);
         }
 
         $enableRecording = (bool) ($data['enable_recording'] ?? false);
         $meetingId = CourseMaterialHelper::meetingId($material);
         $meta = is_array($material->metadata) ? $material->metadata : [];
+        $recordingWarning = null;
+        $recordingApiOk = false;
 
-        if ($enableRecording && $meetingId && $this->zoom->canManageMeetingViaApi($meetingId)) {
-            $result = $this->zoom->setMeetingAutoRecording($meetingId, true);
-            if ($result === null) {
-                return response()->json([
-                    'message' => 'Unable to contact Zoom to enable cloud recording.',
-                ], 503);
+        if ($meetingId && $this->zoom->canManageMeetingViaApi($meetingId)) {
+            $joinBeforeHost = (bool) ($meta['join_before_host'] ?? false);
+            $settingsPatch = [
+                'join_before_host' => $joinBeforeHost,
+                'waiting_room' => (bool) ($meta['waiting_room'] ?? !$joinBeforeHost),
+                'mute_upon_entry' => (bool) ($meta['mute_upon_entry'] ?? true),
+            ];
+            if ($enableRecording || !empty($meta['auto_recording'])) {
+                $settingsPatch['auto_recording'] = 'cloud';
             }
-            if (!empty($result['error'])) {
-                return response()->json([
-                    'message' => 'Zoom rejected cloud recording for this live class.',
-                    'details' => $result['body'] ?? null,
-                ], 502);
-            }
+            $this->zoom->updateMeetingSettings($meetingId, $settingsPatch);
         }
 
         if ($enableRecording) {
             $meta['recording_enabled'] = true;
+
+            if ($meetingId && $this->zoom->canManageMeetingViaApi($meetingId)) {
+                $result = $this->zoom->setMeetingAutoRecording($meetingId, true);
+                if ($result === null) {
+                    $recordingWarning = 'Cloud recording could not be enabled via Zoom API yet. It will be requested when you join the host room.';
+                } elseif (!empty($result['error'])) {
+                    $recordingWarning = (string) (data_get($result, 'body.message')
+                        ?: 'Zoom rejected cloud recording for this meeting. Use Start recording in the host room after you join.');
+                } else {
+                    $recordingApiOk = true;
+                }
+            } elseif (!$meetingId) {
+                $recordingWarning = 'No Zoom meeting ID on this session.';
+            }
+
             $material->metadata = $meta;
             $material->save();
         }
 
         CourseMaterialHelper::markSessionStarted($material);
 
-        return response()->json([
-            'message' => $enableRecording
+        $message = 'Live session marked as started. Learners can join now.';
+        if ($enableRecording) {
+            $message = $recordingApiOk
                 ? 'Live session started with cloud recording enabled for paid learners.'
-                : 'Live session marked as started. Learners can join now.',
+                : 'Live session started. ' . ($recordingWarning ?? 'Recording will be requested when you join the host room.');
+        }
+
+        return response()->json([
+            'message' => $message,
             'recording_enabled' => (bool) ($meta['recording_enabled'] ?? false),
+            'recording_warning' => $recordingWarning,
             'session' => CourseMaterialHelper::toLiveClassArray($material),
         ], 200);
+    }
+
+    public function liveClassLobby(Request $request, CourseMaterial $material)
+    {
+        $data = $request->validate([
+            'instructor_email' => 'required|email',
+        ]);
+
+        $host = $this->findLiveClassHost($data['instructor_email']);
+        if (!$host) {
+            return response()->json(['message' => 'Host account not found'], 404);
+        }
+
+        if (strtolower((string) $material->type) !== 'zoom') {
+            return response()->json(['message' => 'This material is not a live class session.'], 422);
+        }
+
+        if (!$this->canHostMaterial($host, $material)) {
+            return response()->json(['message' => 'You are not authorized to view this live class lobby.'], 403);
+        }
+
+        return response()->json([
+            'material_id' => $material->id,
+            'course_title' => $material->course?->title,
+            'session_title' => $material->title,
+            'waiting' => $this->lobbyService->listForMaterial((int) $material->id),
+            'waiting_count' => count($this->lobbyService->listForMaterial((int) $material->id)),
+        ]);
+    }
+
+    public function dismissLobbyStudent(Request $request, CourseMaterial $material)
+    {
+        $data = $request->validate([
+            'instructor_email' => 'required|email',
+            'student_id' => 'required|integer|min:1',
+        ]);
+
+        $host = $this->findLiveClassHost($data['instructor_email']);
+        if (!$host) {
+            return response()->json(['message' => 'Host account not found'], 404);
+        }
+
+        if (strtolower((string) $material->type) !== 'zoom') {
+            return response()->json(['message' => 'This material is not a live class session.'], 422);
+        }
+
+        if (!$this->canHostMaterial($host, $material)) {
+            return response()->json(['message' => 'You are not authorized to change this live class lobby.'], 403);
+        }
+
+        $this->lobbyService->removeStudent((int) $material->id, (int) $data['student_id']);
+
+        return response()->json([
+            'ok' => true,
+            'student_id' => (int) $data['student_id'],
+            'waiting_count' => count($this->lobbyService->listForMaterial((int) $material->id)),
+        ]);
+    }
+
+    public function setLiveClassAutoAdmit(Request $request, CourseMaterial $material)
+    {
+        $data = $request->validate([
+            'instructor_email' => 'required|email',
+            'enabled' => 'required|boolean',
+        ]);
+
+        $host = $this->findLiveClassHost($data['instructor_email']);
+        if (!$host) {
+            return response()->json(['message' => 'Host account not found'], 404);
+        }
+
+        if (strtolower((string) $material->type) !== 'zoom') {
+            return response()->json(['message' => 'This material is not a live class session.'], 422);
+        }
+
+        if (!$this->canHostMaterial($host, $material)) {
+            return response()->json(['message' => 'You are not authorized to change this live class.'], 403);
+        }
+
+        $enabled = (bool) $data['enabled'];
+        $meta = is_array($material->metadata) ? $material->metadata : [];
+        $meta['auto_admit'] = $enabled;
+
+        $meetingId = trim((string) (CourseMaterialHelper::meetingId($material) ?? ''));
+        if ($meetingId !== '' && $this->zoom->canManageMeetingViaApi($meetingId)) {
+            if ($enabled) {
+                $this->zoom->updateMeetingSettings($meetingId, [
+                    'waiting_room' => false,
+                    'join_before_host' => true,
+                ]);
+            } else {
+                $joinBeforeHost = (bool) ($meta['join_before_host'] ?? false);
+                $this->zoom->updateMeetingSettings($meetingId, [
+                    'waiting_room' => (bool) ($meta['waiting_room'] ?? !$joinBeforeHost),
+                    'join_before_host' => $joinBeforeHost,
+                ]);
+            }
+        }
+
+        $material->metadata = $meta;
+        $material->save();
+
+        return response()->json([
+            'auto_admit' => $enabled,
+            'message' => $enabled
+                ? 'Auto-admit enabled. Learners can join the meeting without waiting for manual approval.'
+                : 'Auto-admit disabled. Learners will wait in the waiting room until you admit them.',
+            'session' => CourseMaterialHelper::toLiveClassArray($material),
+        ]);
+    }
+
+    public function courseEnrolledStudents(Request $request, Course $course)
+    {
+        $data = $request->validate([
+            'instructor_email' => 'required|email',
+        ]);
+
+        $host = $this->findLiveClassHost($data['instructor_email']);
+        if (!$host) {
+            return response()->json(['message' => 'Host account not found'], 404);
+        }
+
+        if (!$this->canHostCourse($host, $course)) {
+            return response()->json(['message' => 'You are not authorized to view enrollments for this course.'], 403);
+        }
+
+        $enrollments = CourseEnrollment::with(['student', 'studyShifts'])
+            ->where('course_id', $course->id)
+            ->get();
+
+        $students = $enrollments->map(function ($enrollment) {
+            $student = $enrollment->student;
+            if (!$student) {
+                return null;
+            }
+
+            return [
+                'id' => $student->id,
+                'first_name' => $student->first_name ?? null,
+                'last_name' => $student->last_name ?? null,
+                'name' => $student->name ?? trim(($student->first_name ?? '') . ' ' . ($student->last_name ?? '')),
+                'email' => $student->email,
+                'enrollment_status' => $enrollment->status,
+                'study_shifts' => $this->formatStudyShifts($enrollment->studyShifts),
+            ];
+        })->filter()->values();
+
+        $notifyableCount = $students->filter(
+            fn ($s) => in_array(strtolower((string) ($s['enrollment_status'] ?? '')), ['paid', 'completed'], true)
+        )->count();
+
+        return response()->json([
+            'students' => $students,
+            'notifyable_count' => $notifyableCount,
+        ]);
+    }
+
+    public function toggleLiveClassRecording(Request $request, CourseMaterial $material)
+    {
+        $data = $request->validate([
+            'instructor_email' => 'required|email',
+            'action' => 'required|string|in:start,stop,pause,resume',
+        ]);
+
+        $instructor = $this->findLiveClassHost($data['instructor_email']);
+        if (!$instructor) {
+            return response()->json(['message' => 'Instructor not found'], 404);
+        }
+
+        if (strtolower((string) $material->type) !== 'zoom') {
+            return response()->json(['message' => 'This material is not a live class session.'], 422);
+        }
+
+        if (!$this->canHostMaterial($instructor, $material)) {
+            return response()->json(['message' => 'You are not assigned to this course.'], 403);
+        }
+
+        $meetingId = trim((string) (CourseMaterialHelper::meetingId($material) ?? ''));
+        if ($meetingId === '') {
+            return response()->json(['message' => 'No active Zoom meeting for this live class.'], 422);
+        }
+
+        $result = $this->zoom->setLiveRecordingStatus($meetingId, $data['action']);
+        if ($result === null) {
+            return response()->json(['message' => 'Zoom API is not configured.'], 422);
+        }
+        if (!empty($result['error'])) {
+            $message = data_get($result, 'body.message', 'Zoom rejected the recording request.');
+            if (stripos((string) $message, 'not recognized') !== false || (int) ($result['status'] ?? 0) === 404) {
+                $message = 'Zoom recording control failed. Ensure Cloud Recording is enabled and your S2S app has meeting:write:admin scope.';
+            }
+
+            return response()->json([
+                'message' => $message,
+                'details' => $result['body'] ?? null,
+            ], 422);
+        }
+
+        $meta = is_array($material->metadata) ? $material->metadata : [];
+        if ($data['action'] === 'start') {
+            $meta['recording_enabled'] = true;
+            $meta['recording_active'] = true;
+        } elseif ($data['action'] === 'stop') {
+            $meta['recording_active'] = false;
+        }
+        $material->metadata = $meta;
+        $material->save();
+
+        return response()->json([
+            'message' => 'Recording ' . $data['action'] . ' request sent.',
+            'recording_enabled' => (bool) ($meta['recording_enabled'] ?? false),
+            'recording_active' => (bool) ($meta['recording_active'] ?? false),
+            'result' => $result,
+        ]);
     }
 
     public function students(Request $request)

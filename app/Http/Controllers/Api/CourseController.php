@@ -21,6 +21,7 @@ use App\Mail\StaffClassScheduledMail;
 use App\Services\MailDeliveryService;
 use App\Services\ZoomService;
 use App\Support\CourseDetailsHelper;
+use App\Support\CourseMaterialHelper;
 use App\Support\EnrollmentStatusHelper;
 use App\Support\PlatformTenantScope;
 use App\Support\ResolvesEnrollmentStaff;
@@ -445,11 +446,20 @@ class CourseController extends Controller
                 'auto_recording' => (bool) ($data['auto_recording'] ?? false),
             ];
 
+            $zoomStatus = $this->zoom->configurationStatus();
+            if (!$zoomStatus['api_ready']) {
+                return response()->json([
+                    'message' => $zoomStatus['message'] ?? 'Zoom API is not configured. Add ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, and ZOOM_CLIENT_SECRET to .env.',
+                ], 503);
+            }
+
             $zoomData = $this->zoom->createMeeting($zoomPayload, $hostId);
 
             if ($zoomData === null) {
+                $oauth = $this->zoom->oauthConnectionStatus();
+
                 return response()->json([
-                    'message' => 'Zoom API is not configured. Add ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, and ZOOM_CLIENT_SECRET to .env.',
+                    'message' => $oauth['message'] ?? 'Zoom OAuth token unavailable. Verify credentials in .env and run php artisan config:clear on the server.',
                 ], 503);
             }
 
@@ -508,6 +518,11 @@ class CourseController extends Controller
                     'join_pwd' => $joinPwd,
                     'duration' => $data['duration'] ?? 60,
                     'timezone' => $data['timezone'] ?? config('app.timezone', 'UTC'),
+                    'auto_recording' => (bool) ($data['auto_recording'] ?? false),
+                    'recording_enabled' => (bool) ($data['auto_recording'] ?? false),
+                    'join_before_host' => (bool) ($data['join_before_host'] ?? false),
+                    'waiting_room' => !((bool) ($data['join_before_host'] ?? false)),
+                    'mute_upon_entry' => (bool) ($data['mute_upon_entry'] ?? true),
                 ],
                 'sort_order' => 0,
             ]);

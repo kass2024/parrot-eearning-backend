@@ -80,7 +80,7 @@ class ZoomMeetingBrandingResolver
         $isMainPlatformHost = $actorUser && PlatformInstitutionHelper::isMainPlatformAdmin($actorUser);
         $isConfiguredZoomHost = $this->isConfiguredZoomHostActor($zoomHostContext, $branding['host']['email'] ?? null);
 
-        if ($isMainPlatformHost || $isConfiguredZoomHost) {
+        if ($isMainPlatformHost || $isConfiguredZoomHost || !($branding['use_institution_logo'] ?? false)) {
             unset($branding['use_institution_logo']);
             $branding['host']['avatar_url'] = $zoomHostContext['avatar_url'] ?? null;
             $branding['host']['name'] = $zoomHostContext['name'] ?? $branding['host']['name'];
@@ -100,6 +100,13 @@ class ZoomMeetingBrandingResolver
 
     private function institutionLogoUrl(PlatformInstitution $institution): ?string
     {
+        if (!empty($institution->logo_path)) {
+            $fromPath = PublicStorageUrl::toApiAbsoluteUrl((string) $institution->logo_path);
+            if ($fromPath) {
+                return $fromPath;
+            }
+        }
+
         $raw = !empty($institution->logo_url) ? (string) $institution->logo_url : null;
         if ($raw === null || $raw === '') {
             return null;

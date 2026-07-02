@@ -8,9 +8,11 @@ use App\Models\CourseMaterial;
 use App\Models\Student;
 use App\Models\User;
 use App\Models\WebinarSetting;
+use App\Services\LiveClassLobbyService;
 use App\Services\ZoomMeetingSdkService;
 use App\Services\ZoomService;
 use App\Support\CourseMaterialHelper;
+use App\Support\EnrollmentStatusHelper;
 use App\Support\FrontendUrl;
 use App\Support\PlatformInstitutionHelper;
 use App\Support\ZoomMeetingBrandingResolver;
@@ -25,6 +27,7 @@ class ZoomEmbedController extends Controller
         protected ZoomMeetingSdkService $sdkService,
         protected ZoomService $zoomService,
         protected ZoomMeetingBrandingResolver $brandingResolver,
+        protected LiveClassLobbyService $lobbyService,
     ) {
     }
 
@@ -88,6 +91,9 @@ class ZoomEmbedController extends Controller
 
         $joinPasswords = $this->resolveSdkJoinPasswords($meetingNumber, $data['password'] ?? null);
 
+        $userEmail = trim((string) ($data['user_email'] ?? ''));
+        $userEmail = $userEmail !== '' ? $userEmail : null;
+
         try {
             $payload = $this->sdkService->buildJoinPayload(
                 $meetingNumber,
@@ -95,6 +101,7 @@ class ZoomEmbedController extends Controller
                 $role,
                 $joinPasswords['password'],
                 $this->hostZakForRole($role),
+                $userEmail,
             );
         } catch (\Throwable $e) {
             return response()->json(['message' => $e->getMessage()], 422);
@@ -124,13 +131,14 @@ class ZoomEmbedController extends Controller
             return response()->json($response);
         }
 
-        return response()->json(['sdk' => $payload]);
+        return response()->json(array_merge(['sdk' => $payload], $branding));
     }
 
     public function learnerMaterialAuth(Request $request, CourseMaterial $material): JsonResponse
     {
         $data = $request->validate([
-            'student_id' => 'required|integer|exists:students,id',
+            'student_id' => 'nullable|integer|exists:students,id',
+            'learner_email' => 'nullable|email',
         ]);
 
         return $this->materialAuth($material, 0, $data);
@@ -192,8 +200,8 @@ class ZoomEmbedController extends Controller
                 return response()->json(['message' => 'Instructor email is required to host.'], 422);
             }
 
-            $instructor = User::query()->where('email', $email)->where('role', 'instructor')->first();
-            if (!$instructor || !$instructor->assignedCourses()->where('courses.id', $material->course_id)->exists()) {
+            $instructor = User::query()->where('email', $email)->first();
+            if (!$instructor || !$this->canHostLiveClass($instructor, $material)) {
                 return response()->json(['message' => 'You are not authorized to host this session.'], 403);
             }
 
@@ -203,14 +211,15 @@ class ZoomEmbedController extends Controller
                 $userName = trim((string) ($instructor->name ?? '')) ?: 'Instructor';
             }
             $participantAvatar = !empty($instructor->avatar) ? (string) $instructor->avatar : null;
+            $joinUserEmail = $email !== '' ? $email : null;
         } else {
             $preview = !empty($data['preview']);
             $email = trim((string) ($data['instructor_email'] ?? ''));
             $participantAvatar = null;
 
             if ($preview && $email !== '') {
-                $instructor = User::query()->where('email', $email)->where('role', 'instructor')->first();
-                if (!$instructor || !$instructor->assignedCourses()->where('courses.id', $material->course_id)->exists()) {
+                $instructor = User::query()->where('email', $email)->first();
+                if (!$instructor || !$this->canHostLiveClass($instructor, $material)) {
                     return response()->json(['message' => 'You are not authorized to preview this session.'], 403);
                 }
 
@@ -218,18 +227,29 @@ class ZoomEmbedController extends Controller
                 $participantAvatar = !empty($instructor->avatar) ? (string) $instructor->avatar : null;
             } else {
                 $studentId = (int) ($data['student_id'] ?? 0);
+                if ($studentId <= 0 && !empty($data['learner_email'])) {
+                    $byEmail = Student::query()
+                        ->whereRaw('LOWER(TRIM(email)) = ?', [strtolower(trim((string) $data['learner_email']))])
+                        ->first();
+                    if ($byEmail) {
+                        $studentId = (int) $byEmail->id;
+                    }
+                }
+
                 if ($studentId <= 0) {
-                    return response()->json(['message' => 'Student ID is required to join.'], 422);
+                    return response()->json(['message' => 'Student ID is required to join. Sign in as a learner first.'], 422);
                 }
 
                 $enrolled = CourseEnrollment::query()
                     ->where('course_id', $material->course_id)
                     ->where('student_id', $studentId)
-                    ->whereIn('status', ['paid', 'completed'])
+                    ->whereIn('status', EnrollmentStatusHelper::accessStatuses())
                     ->exists();
 
                 if (!$enrolled) {
-                    return response()->json(['message' => 'You are not enrolled in this course.'], 403);
+                    return response()->json([
+                        'message' => 'You are not enrolled in this course, or your enrollment is not yet approved.',
+                    ], 403);
                 }
 
                 $state = CourseMaterialHelper::liveSessionState($material);
@@ -247,6 +267,14 @@ class ZoomEmbedController extends Controller
                     $userName = (string) ($student->email ?? 'Learner');
                 }
                 $participantAvatar = !empty($student->avatar) ? (string) $student->avatar : null;
+                $joinUserEmail = trim((string) ($student->email ?? '')) ?: null;
+
+                $this->lobbyService->recordCheckIn(
+                    (int) $material->id,
+                    $studentId,
+                    $userName,
+                    (string) ($student->email ?? '')
+                );
             }
         }
 
@@ -290,6 +318,7 @@ class ZoomEmbedController extends Controller
                 $role,
                 $password,
                 $this->hostZakForRole($role),
+                $joinUserEmail,
             );
         } catch (\Throwable $e) {
             return response()->json(['message' => $e->getMessage()], 422);
@@ -308,6 +337,10 @@ class ZoomEmbedController extends Controller
                 'id' => $material->id,
                 'title' => $material->title,
                 'course_title' => $material->course?->title,
+                'recording_enabled' => (bool) (
+                    data_get($material->metadata, 'recording_enabled')
+                    ?? data_get($material->metadata, 'auto_recording', false)
+                ),
             ],
             'preview' => !empty($data['preview']),
             'participant' => [
@@ -400,6 +433,20 @@ class ZoomEmbedController extends Controller
         $token = $result['token'] ?? null;
 
         return is_string($token) && $token !== '' ? $token : null;
+    }
+
+    protected function canHostLiveClass(User $user, CourseMaterial $material): bool
+    {
+        $role = strtolower(trim((string) ($user->role ?? '')));
+        if (in_array($role, ['admin', 'staff'], true)) {
+            return true;
+        }
+
+        if ($role !== 'instructor') {
+            return false;
+        }
+
+        return $user->assignedCourses()->where('courses.id', $material->course_id)->exists();
     }
 
     /**
